@@ -51,12 +51,18 @@ func NewIrcd(host string) Ircd {
 }
 
 func (i *Ircd) NewClient(c net.Conn) Client {
-	return Client{
+	cl := Client{
 		serv:    i,
 		con:     c,
 		inlines: bufio.NewScanner(c),
-		host:    c.RemoteAddr().String(),
 	}
+
+	// grab just the ip of the remote user. pretty sure it's a TCPConn...
+	tcpa := c.RemoteAddr().(*net.TCPAddr)
+
+	cl.host = tcpa.IP.String()
+
+	return cl
 }
 
 func (i *Ircd) AddClient(c *Client) error {
@@ -102,14 +108,14 @@ func (i *Ircd) Serve(l net.Listener) error {
 	}
 }
 
-func (i *Ircd) PrivmsgAll(from *Client, msg string) {
+func (i *Ircd) Privmsg(from *Client, to, msg string) {
 	i.cm.Lock()
 	defer i.cm.Unlock()
 
-	for _, c := range i.clients {
-		if c.nick != from.nick {
-			c.Send(from.Prefix(), "PRIVMSG", []string{c.nick, ":" + msg}...)
-		}
+	if c, ok := i.clients[to]; ok {
+		c.Privmsg(from.Prefix(), msg)
+	} else {
+		from.Send(i.hostname, "401", to, "No such user/nick")
 	}
 }
 
@@ -161,7 +167,7 @@ func (c *Client) Serve() {
 			if len(m.Args) != 2 {
 				c.Errorf("%s: bad arguments", m.Command)
 			} else {
-				c.serv.PrivmsgAll(c, m.Args[1])
+				c.serv.Privmsg(c, m.Args[0], m.Args[1])
 			}
 		default:
 			c.Errorf("not implemented: %s", m.Command)
@@ -169,13 +175,18 @@ func (c *Client) Serve() {
 
 	}
 
+	// dont forget to delete client when it's all over
+	c.serv.RemoveClient(c)
+
 	if err := c.inlines.Err(); err != nil {
 		log.Printf("Client.Serve: %s", err)
 	}
 }
 
 func (c *Client) Send(prefix, command string, args ...string) error {
-	m := parser.Message{prefix, command, args}
+	margs := []string{c.nick}
+	margs = append(margs, args...)
+	m := parser.Message{prefix, command, margs}
 
 	b, err := m.MarshalText()
 	if err != nil {
@@ -186,6 +197,11 @@ func (c *Client) Send(prefix, command string, args ...string) error {
 	fmt.Fprintf(c.con, "%s\r\n", b)
 	return err
 }
+
+func (c *Client) Privmsg(from, msg string) {
+	c.Send(from, "PRIVMSG", msg)
+}
+
 func (c *Client) Error(content string) error {
 	return c.Send(c.serv.hostname, "NOTICE", []string{"*", content}...)
 }
@@ -197,9 +213,9 @@ func (c *Client) Errorf(format string, args ...interface{}) error {
 // do the dance to make the client think it connected
 func (c *Client) DoMotd() {
 	c.Send(c.serv.hostname, "001", fmt.Sprintf("Welcome %s", c.Prefix()))
-	c.Send(c.serv.hostname, "002", c.serv.hostname, fmt.Sprintf("We are %s running go-ircd", c.serv.hostname))
+	c.Send(c.serv.hostname, "002", fmt.Sprintf("We are %s running go-ircd", c.serv.hostname))
 	c.Send(c.serv.hostname, "003", fmt.Sprintf("Created right now!"))
-	c.Send(c.serv.hostname, "004", c.serv.hostname, fmt.Sprintf("%s %s %s %s", c.serv.hostname, "go-ircd", "v", "m"))
+	c.Send(c.serv.hostname, "004", c.serv.hostname, "go-ircd", "v", "m")
 
 	c.Send(c.serv.hostname, "251", fmt.Sprintf("There are %d users and %d services on %d servers", 1, 0, 1))
 	c.Send(c.serv.hostname, "252", "0", "operator(s) online")
