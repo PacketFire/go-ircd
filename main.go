@@ -41,13 +41,19 @@ func main() {
 
 type Ircd struct {
 	hostname string
+	boottime time.Time
 
-	clients map[string]*Client
-	cm      sync.Mutex
+	nclients int
+	clients  map[string]*Client
+	cm       sync.Mutex
 }
 
 func NewIrcd(host string) Ircd {
-	return Ircd{hostname: host, clients: make(map[string]*Client)}
+	return Ircd{
+		hostname: host,
+		boottime: time.Now(),
+		clients:  make(map[string]*Client),
+	}
 }
 
 func (i *Ircd) NewClient(c net.Conn) Client {
@@ -55,6 +61,7 @@ func (i *Ircd) NewClient(c net.Conn) Client {
 		serv:    i,
 		con:     c,
 		inlines: bufio.NewScanner(c),
+		modes:   NewModeset(),
 	}
 
 	// grab just the ip of the remote user. pretty sure it's a TCPConn...
@@ -78,6 +85,7 @@ func (i *Ircd) AddClient(c *Client) error {
 	}
 
 	i.clients[c.nick] = c
+	i.nclients++
 
 	return nil
 }
@@ -91,6 +99,7 @@ func (i *Ircd) RemoveClient(c *Client) error {
 	defer i.cm.Unlock()
 
 	delete(i.clients, c.nick)
+	i.nclients--
 
 	return nil
 }
@@ -127,6 +136,7 @@ var (
 		"USER":    (*Client).HandleUser,
 		"PING":    (*Client).HandlePing,
 		"PRIVMSG": (*Client).HandlePrivmsg,
+		"MODE":    (*Client).HandleMode,
 	}
 )
 
@@ -136,6 +146,7 @@ type Client struct {
 	inlines              *bufio.Scanner
 	nick, user, realname string // various names
 	host                 string
+	modes                Modeset
 }
 
 // make a prefix from this client
@@ -144,7 +155,7 @@ func (c *Client) Prefix() string {
 }
 
 func (c Client) String() string {
-  return c.Prefix()
+	return c.Prefix()
 }
 
 // client r/w
@@ -176,12 +187,13 @@ func (c *Client) Serve() {
 		log.Printf("Client.Serve: %s", err)
 	}
 
-  log.Printf("Client.Serve: %s is done", c)
+	log.Printf("Client.Serve: %s is done", c)
 }
 
 func (c *Client) HandleNick(m parser.Message) error {
 	if len(m.Args) != 1 {
-		return fmt.Errorf("bad arguments")
+		c.EParams(m.Command)
+		return nil
 	} else {
 		// check if nick is in use
 
@@ -200,15 +212,16 @@ func (c *Client) HandleNick(m parser.Message) error {
 
 	if c.nick != "" && c.user != "" && c.realname != "" {
 		// send motd when everything is ready
-		c.DoMotd()
 		c.serv.AddClient(c)
+		c.DoMotd()
 	}
 	return nil
 }
 
 func (c *Client) HandleUser(m parser.Message) error {
 	if len(m.Args) != 4 {
-		return fmt.Errorf("bad arguments")
+		c.EParams(m.Command)
+		return nil
 	} else {
 		c.user = m.Args[0]
 		c.realname = m.Args[3]
@@ -216,15 +229,16 @@ func (c *Client) HandleUser(m parser.Message) error {
 
 	if c.nick != "" && c.user != "" && c.realname != "" {
 		// send motd when everything is ready
-		c.DoMotd()
 		c.serv.AddClient(c)
+		c.DoMotd()
 	}
 	return nil
 }
 
 func (c *Client) HandlePing(m parser.Message) error {
 	if len(m.Args) != 1 {
-		return fmt.Errorf("bad arguments")
+		c.EParams(m.Command)
+		return nil
 	} else {
 		c.Send("", "PONG", m.Args[0])
 	}
@@ -233,10 +247,61 @@ func (c *Client) HandlePing(m parser.Message) error {
 
 func (c *Client) HandlePrivmsg(m parser.Message) error {
 	if len(m.Args) != 2 {
-		return fmt.Errorf("bad arguments")
+		c.EParams(m.Command)
+		return nil
 	} else {
 		c.serv.Privmsg(c, m.Args[0], m.Args[1])
 	}
+	return nil
+}
+
+const (
+	ModeQuery = iota
+	ModeAdd
+	ModeDel
+)
+
+// Change modes.
+//
+// TODO(mischief): check for user/chan modes when channels are implemented
+func (c *Client) HandleMode(m parser.Message) error {
+	dir := ModeAdd
+
+	if len(m.Args) < 2 {
+		c.EParams(m.Command)
+		return nil
+	}
+
+	if m.Args[0] != c.nick {
+		c.Send(c.serv.hostname, "502", c.nick, "no")
+		return nil
+	}
+
+	// iterate through flags
+	for _, r := range m.Args[1] {
+		switch r {
+		case '+':
+			dir = ModeAdd
+		case '-':
+			dir = ModeDel
+		case '=':
+			dir = ModeQuery
+		default:
+			switch dir {
+			case ModeAdd:
+				log.Printf("HandleMode %s setting %c", c, r)
+				c.modes.Set(r, "")
+			case ModeDel:
+				log.Printf("HandleMode %s clearing %c", c, r)
+				c.modes.Clear(r)
+			case ModeQuery:
+				// do something with the result of this
+				//c.modes.Get(r)
+			}
+		}
+
+	}
+
 	return nil
 }
 
@@ -265,20 +330,24 @@ func (c *Client) Errorf(format string, args ...interface{}) error {
 	return c.Error(fmt.Sprintf(format, args...))
 }
 
+func (c *Client) EParams(cmd string) error {
+	return c.Send(c.serv.hostname, "461", c.nick, cmd, "not enough parameters")
+}
+
 // do the dance to make the client think it connected
 func (c *Client) DoMotd() {
 	c.Send(c.serv.hostname, "001", c.nick, fmt.Sprintf("Welcome %s", c.Prefix()))
 	c.Send(c.serv.hostname, "002", c.nick, fmt.Sprintf("We are %s running go-ircd", c.serv.hostname))
-	c.Send(c.serv.hostname, "003", c.nick, fmt.Sprintf("Created right now!"))
+	c.Send(c.serv.hostname, "003", c.nick, fmt.Sprintf("Booted %s", c.serv.boottime))
 	c.Send(c.serv.hostname, "004", c.nick, c.serv.hostname, "go-ircd", "v", "m")
 
-	c.Send(c.serv.hostname, "251", c.nick, fmt.Sprintf("There are %d users and %d services on %d servers", 1, 0, 1))
+	c.Send(c.serv.hostname, "251", c.nick, fmt.Sprintf("There are %d users and %d services on %d servers", c.serv.nclients, 0, 1))
 	c.Send(c.serv.hostname, "252", c.nick, "0", "operator(s) online")
 	c.Send(c.serv.hostname, "253", c.nick, "0", "unknown connection(s)")
 	c.Send(c.serv.hostname, "254", c.nick, "0", "channel(s) formed")
-	c.Send(c.serv.hostname, "255", c.nick, fmt.Sprintf("I have %d clients and %d servers", 1, 1))
+	c.Send(c.serv.hostname, "255", c.nick, fmt.Sprintf("I have %d clients and %d servers", c.serv.nclients, 1))
 
 	c.Send(c.serv.hostname, "375", c.nick, "- Message of the Day -")
-	c.Send(c.serv.hostname, "372", c.nick, "- Nada.")
+	c.Send(c.serv.hostname, "372", c.nick, "- It works!")
 	c.Send(c.serv.hostname, "376", c.nick, "End of MOTD")
 }
