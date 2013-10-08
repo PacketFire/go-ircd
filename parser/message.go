@@ -3,7 +3,7 @@ package parser
 import (
 	"bytes"
 	"fmt"
-	"strings"
+	//"strings"
 )
 
 type Message struct {
@@ -57,11 +57,11 @@ func (m *Message) MarshalText() (text []byte, err error) {
 	for i, arg := range m.Args {
 		buf.WriteByte(' ')
 		if i == len(m.Args)-1 {
-			if strings.IndexAny(arg, " :") >= 0 {
+			//if strings.IndexAny(arg, " :") >= 0 {
 				buf.WriteByte(':')
-			}
+			//}
 		}
-		buf.WriteString(m.Args[i])
+		buf.WriteString(arg)
 	}
 	return buf.Bytes(), nil
 }
