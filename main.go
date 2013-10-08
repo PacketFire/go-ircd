@@ -43,9 +43,12 @@ type Ircd struct {
 	hostname string
 	boottime time.Time
 
+	// number of currently connected clients
 	nclients int
-	clients  map[string]*Client
-	cm       sync.Mutex
+
+	// nick->client, protected by RWMutex
+	clients map[string]*Client
+	cm      sync.RWMutex
 }
 
 func NewIrcd(host string) Ircd {
@@ -56,7 +59,7 @@ func NewIrcd(host string) Ircd {
 	}
 }
 
-func (i *Ircd) NewClient(c net.Conn) Client {
+func (i *Ircd) NewClient(c net.Conn) *Client {
 	cl := Client{
 		serv:    i,
 		con:     c,
@@ -69,7 +72,7 @@ func (i *Ircd) NewClient(c net.Conn) Client {
 
 	cl.host = tcpa.IP.String()
 
-	return cl
+	return &cl
 }
 
 func (i *Ircd) AddClient(c *Client) error {
@@ -109,8 +112,8 @@ func (i *Ircd) RemoveClient(c *Client) error {
 }
 
 func (i *Ircd) FindByNick(nick string) *Client {
-	i.cm.Lock()
-	defer i.cm.Unlock()
+	i.cm.RLock()
+	defer i.cm.RUnlock()
 
 	return i.clients[nick]
 }
@@ -124,66 +127,25 @@ func (i *Ircd) Serve(l net.Listener) error {
 
 		c := i.NewClient(rw)
 
-		go c.Serve()
+		go i.serveClient(c)
 	}
 }
 
-func (i *Ircd) Privmsg(from *Client, to, msg string) {
-	toc := i.FindByNick(to)
-
-	if toc != nil {
-		toc.Privmsg(from.Prefix(), msg)
-	} else {
-		from.Send(i.hostname, "401", from.nick, to, "No such user/nick")
-	}
-}
-
-type MessageHandler func(c *Client, m parser.Message) error
+type MessageHandler func(i *Ircd, c *Client, m parser.Message) error
 
 var (
 	msgtab = map[string]MessageHandler{
-		"NICK":    (*Client).HandleNick,
-		"USER":    (*Client).HandleUser,
-		"QUIT":    (*Client).HandleQuit,
-		"PING":    (*Client).HandlePing,
-		"PRIVMSG": (*Client).HandlePrivmsg,
-		"MODE":    (*Client).HandleMode,
-		"WHO":     (*Client).HandleWho,
+		"NICK":    (*Ircd).HandleNick,
+		"USER":    (*Ircd).HandleUser,
+		"QUIT":    (*Ircd).HandleQuit,
+		"PING":    (*Ircd).HandlePing,
+		"PRIVMSG": (*Ircd).HandlePrivmsg,
+		"MODE":    (*Ircd).HandleMode,
+		"WHO":     (*Ircd).HandleWho,
 	}
 )
 
-type Client struct {
-	// server reference
-	serv *Ircd
-
-	// connection
-	con net.Conn
-
-	// scanner of incoming irc messages
-	inlines *bufio.Scanner
-
-	// various names
-	nick, user, realname string
-	host                 string
-
-	// user modes
-	modes Modeset
-
-	// used to prevent multiple clients appearing on NICK
-	welcome sync.Once
-}
-
-// make a prefix from this client
-func (c *Client) Prefix() string {
-	return fmt.Sprintf("%s!%s@%s", c.nick, c.user, c.host)
-}
-
-func (c Client) String() string {
-	return c.Prefix()
-}
-
-// client r/w
-func (c *Client) Serve() {
+func (i *Ircd) serveClient(c *Client) {
 	defer c.con.Close()
 
 	for c.inlines.Scan() {
@@ -195,91 +157,102 @@ func (c *Client) Serve() {
 		log.Printf("Client.Serve: %s -> %s", c, m)
 
 		if h, ok := msgtab[m.Command]; ok {
-			if err := h(c, m); err != nil {
+			if err := h(i, c, m); err != nil {
 				c.Errorf("%s: %s", m.Command, err)
 			}
 		} else {
 			c.Errorf("not implemented: %s", m.Command)
 		}
-
 	}
 
-	// dont forget to delete client when it's all over
-	c.serv.RemoveClient(c)
+	i.RemoveClient(c)
 
 	if err := c.inlines.Err(); err != nil {
-		log.Printf("Client.Serve: %s", err)
+		log.Printf("serveClient: %s", err)
 	}
 
-	log.Printf("Client.Serve: %s is done", c)
+	log.Printf("serveClient: %s is done", c)
 }
 
-func (c *Client) HandleNick(m parser.Message) error {
+func (i *Ircd) HandleNick(c *Client, m parser.Message) error {
 	if len(m.Args) != 1 {
 		c.EParams(m.Command)
 		return nil
-	} else if c.serv.FindByNick(m.Args[0]) != nil {
+	} else if i.FindByNick(m.Args[0]) != nil {
 		// check if nick is in use
-		c.Send(c.serv.hostname, "433", "*", m.Args[0], "Nickname already in use")
+		c.Send(i.hostname, "433", "*", m.Args[0], "Nickname already in use")
 		return nil
 	}
 
+	// write lock
+	c.Lock()
 	c.nick = m.Args[0]
+	c.Unlock()
 
+	c.RLock()
+	defer c.RUnlock()
 	if c.nick != "" && c.user != "" {
 		// send motd when everything is ready, just once
 		c.welcome.Do(func() {
-			c.serv.AddClient(c)
-			c.DoMotd()
+			i.AddClient(c)
+			i.DoMotd(c)
 		})
 	}
+
 	return nil
 }
 
-func (c *Client) HandleUser(m parser.Message) error {
+func (i *Ircd) HandleUser(c *Client, m parser.Message) error {
 	if len(m.Args) != 4 {
 		c.EParams(m.Command)
 		return nil
-	} else {
-		c.user = m.Args[0]
-		c.realname = m.Args[3]
 	}
 
+	// write lock
+	c.Lock()
+	c.user = m.Args[0]
+	c.realname = m.Args[3]
+	c.Unlock()
+
+	c.RLock()
+	defer c.RUnlock()
 	if c.nick != "" && c.user != "" {
 		// send motd when everything is ready, just once
 		c.welcome.Do(func() {
-			c.serv.AddClient(c)
-			c.DoMotd()
+			i.AddClient(c)
+			i.DoMotd(c)
 		})
 	}
+
 	return nil
 }
 
-// handle QUIT. forcefully shut down con for now...
-func (c *Client) HandleQuit(m parser.Message) error {
+func (i *Ircd) HandleQuit(c *Client, m parser.Message) error {
 	c.Error("goodbye")
 	c.con.Close()
 
 	return nil
 }
 
-func (c *Client) HandlePing(m parser.Message) error {
+func (i *Ircd) HandlePing(c *Client, m parser.Message) error {
 	if len(m.Args) != 1 {
 		c.EParams(m.Command)
 		return nil
-	} else {
-		c.Send("", "PONG", m.Args[0])
 	}
+
+	c.Send("", "PONG", m.Args[0])
+
 	return nil
 }
 
-func (c *Client) HandlePrivmsg(m parser.Message) error {
+func (i *Ircd) HandlePrivmsg(c *Client, m parser.Message) error {
 	if len(m.Args) != 2 {
 		c.EParams(m.Command)
 		return nil
-	} else {
-		c.serv.Privmsg(c, m.Args[0], m.Args[1])
 	}
+
+	i.Privmsg(c, m.Args[0], m.Args[1])
+
 	return nil
 }
 
@@ -292,13 +265,18 @@ const (
 // Change modes.
 //
 // TODO(mischief): check for user/chan modes when channels are implemented
-func (c *Client) HandleMode(m parser.Message) error {
+func (i *Ircd) HandleMode(c *Client, m parser.Message) error {
+
 	dir := ModeAdd
 
 	if len(m.Args) < 2 {
 		c.EParams(m.Command)
 		return nil
 	}
+
+	// write lock
+	c.Lock()
+	defer c.Unlock()
 
 	if m.Args[0] != c.nick {
 		c.Send(c.serv.hostname, "502", c.nick, "no")
@@ -333,22 +311,91 @@ func (c *Client) HandleMode(m parser.Message) error {
 	return nil
 }
 
-func (c *Client) HandleWho(m parser.Message) error {
+func (i *Ircd) HandleWho(c *Client, m parser.Message) error {
 	u := make(map[string]*Client)
 
-	c.serv.cm.Lock()
-	for k, v := range c.serv.clients {
+	i.cm.RLock()
+	for k, v := range i.clients {
 		u[k] = v
 	}
-	c.serv.cm.Unlock()
+	i.cm.RUnlock()
 
 	for _, cl := range u {
-		c.Send(c.serv.hostname, "352", c.nick, "0", cl.user, cl.host, c.serv.hostname, cl.nick, fmt.Sprintf("0 %s", cl.realname))
+		// read lock cl
+		cl.RLock()
+		c.Send(c.serv.hostname, "352", c.nick, "0", cl.user, cl.host, i.hostname, cl.nick, fmt.Sprintf("0 %s", cl.realname))
+		cl.RUnlock()
 	}
 
-	c.Send(c.serv.hostname, "315", "end of WHO")
+	c.Send(i.hostname, "315", "end of WHO")
 
 	return nil
+}
+
+func (i *Ircd) Privmsg(from *Client, to, msg string) {
+	toc := i.FindByNick(to)
+
+	from.RLock()
+	defer from.RUnlock()
+
+	if toc != nil {
+		toc.RLock()
+		defer toc.RUnlock()
+		toc.Privmsg(from.Prefix(), msg)
+	} else {
+		from.Send(i.hostname, "401", from.nick, to, "No such user/nick")
+	}
+}
+
+func (i *Ircd) DoMotd(c *Client) {
+	c.Numeric("001", fmt.Sprintf("Welcome %s", c.Prefix()))
+	c.Numeric("002", fmt.Sprintf("We are %s running go-ircd", i.hostname))
+	c.Numeric("003", fmt.Sprintf("Booted %s", i.boottime))
+	c.Numeric("004", i.hostname, "go-ircd", "v", "m")
+
+	c.Numeric("251", fmt.Sprintf("There are %d users and %d services on %d servers", i.nclients, 0, 1))
+	c.Numeric("252", "0", "operator(s) online")
+	c.Numeric("253", "0", "unknown connection(s)")
+	c.Numeric("254", "0", "channel(s) formed")
+	c.Numeric("255", fmt.Sprintf("I have %d clients and %d servers", c.serv.nclients, 1))
+
+	c.Numeric("375", "- Message of the Day -")
+	c.Numeric("372", "- It works!")
+	c.Numeric("376", "End of MOTD")
+
+}
+
+type Client struct {
+	// server reference
+	serv *Ircd
+
+	// connection
+	con net.Conn
+
+	// scanner of incoming irc messages
+	inlines *bufio.Scanner
+
+	// used to prevent multiple clients appearing on NICK
+	welcome sync.Once
+
+	// RWMutex for the below data. we can't have multiple people reading/writing..
+	sync.RWMutex
+
+	// various names
+	nick, user, realname string
+	host                 string
+
+	// user modes
+	modes Modeset
+}
+
+// make a prefix from this client
+func (c *Client) Prefix() string {
+	return fmt.Sprintf("%s!%s@%s", c.nick, c.user, c.host)
+}
+
+func (c Client) String() string {
+	return c.Prefix()
 }
 
 func (c *Client) Send(prefix, command string, args ...string) error {
@@ -365,7 +412,9 @@ func (c *Client) Send(prefix, command string, args ...string) error {
 }
 
 func (c *Client) Privmsg(from, msg string) {
+	c.RLock()
 	c.Send(from, "PRIVMSG", c.nick, msg)
+	c.RUnlock()
 }
 
 func (c *Client) Error(content string) error {
@@ -380,20 +429,7 @@ func (c *Client) EParams(cmd string) error {
 	return c.Send(c.serv.hostname, "461", c.nick, cmd, "not enough parameters")
 }
 
-// do the dance to make the client think it connected
-func (c *Client) DoMotd() {
-	c.Send(c.serv.hostname, "001", c.nick, fmt.Sprintf("Welcome %s", c.Prefix()))
-	c.Send(c.serv.hostname, "002", c.nick, fmt.Sprintf("We are %s running go-ircd", c.serv.hostname))
-	c.Send(c.serv.hostname, "003", c.nick, fmt.Sprintf("Booted %s", c.serv.boottime))
-	c.Send(c.serv.hostname, "004", c.nick, c.serv.hostname, "go-ircd", "v", "m")
-
-	c.Send(c.serv.hostname, "251", c.nick, fmt.Sprintf("There are %d users and %d services on %d servers", c.serv.nclients, 0, 1))
-	c.Send(c.serv.hostname, "252", c.nick, "0", "operator(s) online")
-	c.Send(c.serv.hostname, "253", c.nick, "0", "unknown connection(s)")
-	c.Send(c.serv.hostname, "254", c.nick, "0", "channel(s) formed")
-	c.Send(c.serv.hostname, "255", c.nick, fmt.Sprintf("I have %d clients and %d servers", c.serv.nclients, 1))
-
-	c.Send(c.serv.hostname, "375", c.nick, "- Message of the Day -")
-	c.Send(c.serv.hostname, "372", c.nick, "- It works!")
-	c.Send(c.serv.hostname, "376", c.nick, "End of MOTD")
+func (c *Client) Numeric(code string, msg ...string) error {
+	out := append([]string{c.nick}, msg...)
+	return c.Send(c.serv.hostname, code, out...)
 }
