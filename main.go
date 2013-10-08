@@ -98,10 +98,21 @@ func (i *Ircd) RemoveClient(c *Client) error {
 	i.cm.Lock()
 	defer i.cm.Unlock()
 
-	delete(i.clients, c.nick)
-	i.nclients--
+	if _, ok := i.clients[c.nick]; ok {
+		delete(i.clients, c.nick)
+		i.nclients--
+	} else {
+		return fmt.Errorf("no such nick %s", c.nick)
+	}
 
 	return nil
+}
+
+func (i *Ircd) FindByNick(nick string) *Client {
+	i.cm.Lock()
+	defer i.cm.Unlock()
+
+	return i.clients[nick]
 }
 
 func (i *Ircd) Serve(l net.Listener) error {
@@ -118,11 +129,10 @@ func (i *Ircd) Serve(l net.Listener) error {
 }
 
 func (i *Ircd) Privmsg(from *Client, to, msg string) {
-	i.cm.Lock()
-	defer i.cm.Unlock()
+	toc := i.FindByNick(to)
 
-	if c, ok := i.clients[to]; ok {
-		c.Privmsg(from.Prefix(), msg)
+	if toc != nil {
+		toc.Privmsg(from.Prefix(), msg)
 	} else {
 		from.Send(i.hostname, "401", from.nick, to, "No such user/nick")
 	}
@@ -134,6 +144,7 @@ var (
 	msgtab = map[string]MessageHandler{
 		"NICK":    (*Client).HandleNick,
 		"USER":    (*Client).HandleUser,
+		"QUIT":    (*Client).HandleQuit,
 		"PING":    (*Client).HandlePing,
 		"PRIVMSG": (*Client).HandlePrivmsg,
 		"MODE":    (*Client).HandleMode,
@@ -197,20 +208,15 @@ func (c *Client) HandleNick(m parser.Message) error {
 	} else {
 		// check if nick is in use
 
-		c.serv.cm.Lock()
-		defer c.serv.cm.Unlock()
-
-		for _, oc := range c.serv.clients {
-			if oc.nick == m.Args[0] {
-				c.Send(c.serv.hostname, "433", "*", m.Args[0], "Nickname already in use")
-				return nil
-			}
+		if c.serv.FindByNick(m.Args[0]) != nil {
+			c.Send(c.serv.hostname, "433", "*", m.Args[0], "Nickname already in use")
+			return nil
 		}
 
 		c.nick = m.Args[0]
 	}
 
-	if c.nick != "" && c.user != "" && c.realname != "" {
+	if c.nick != "" && c.user != "" {
 		// send motd when everything is ready
 		c.serv.AddClient(c)
 		c.DoMotd()
@@ -227,12 +233,20 @@ func (c *Client) HandleUser(m parser.Message) error {
 		c.realname = m.Args[3]
 	}
 
-	if c.nick != "" && c.user != "" && c.realname != "" {
+	if c.nick != "" && c.user != "" {
 		// send motd when everything is ready
 		c.serv.AddClient(c)
 		c.DoMotd()
 	}
 	return nil
+}
+
+// handle QUIT. forcefully shut down con for now...
+func (c *Client) HandleQuit(m parser.Message) error {
+  c.Error("goodbye")
+  c.con.Close()
+
+  return nil
 }
 
 func (c *Client) HandlePing(m parser.Message) error {
