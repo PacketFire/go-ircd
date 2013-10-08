@@ -118,6 +118,19 @@ func (i *Ircd) FindByNick(nick string) *Client {
 	return i.clients[nick]
 }
 
+func (i *Ircd) ChangeNick(old, nw string) error {
+	i.cm.Lock()
+	defer i.cm.Unlock()
+	if c, ok := i.clients[old]; ok {
+		i.clients[nw] = c
+		delete(i.clients, old)
+	} else {
+		return fmt.Errorf("no such nick %s", old)
+	}
+
+	return nil
+}
+
 func (i *Ircd) Serve(l net.Listener) error {
 	for {
 		rw, err := l.Accept()
@@ -186,12 +199,22 @@ func (i *Ircd) HandleNick(c *Client, m parser.Message) error {
 
 	// write lock
 	c.Lock()
+
+	oldnick := c.nick
+	// check if we're actually updating an existing client's nick.
+	if oldc := i.FindByNick(c.nick); oldc != nil {
+		i.ChangeNick(c.nick, m.Args[0])
+	}
+
 	c.nick = m.Args[0]
 	c.Unlock()
 
 	c.RLock()
 	defer c.RUnlock()
 	if c.nick != "" && c.user != "" {
+		// ack the nick change only if we have an established user/nick
+		c.Send(fmt.Sprintf("%s!%s@%s", oldnick, c.user, c.host), "NICK", c.nick)
+
 		// send motd when everything is ready, just once
 		c.welcome.Do(func() {
 			i.AddClient(c)
