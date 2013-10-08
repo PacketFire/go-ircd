@@ -148,16 +148,29 @@ var (
 		"PING":    (*Client).HandlePing,
 		"PRIVMSG": (*Client).HandlePrivmsg,
 		"MODE":    (*Client).HandleMode,
+		"WHO":     (*Client).HandleWho,
 	}
 )
 
 type Client struct {
-	serv                 *Ircd
-	con                  net.Conn
-	inlines              *bufio.Scanner
-	nick, user, realname string // various names
+	// server reference
+	serv *Ircd
+
+	// connection
+	con net.Conn
+
+	// scanner of incoming irc messages
+	inlines *bufio.Scanner
+
+	// various names
+	nick, user, realname string
 	host                 string
-	modes                Modeset
+
+	// user modes
+	modes Modeset
+
+	// used to prevent multiple clients appearing on NICK
+	welcome sync.Once
 }
 
 // make a prefix from this client
@@ -205,21 +218,20 @@ func (c *Client) HandleNick(m parser.Message) error {
 	if len(m.Args) != 1 {
 		c.EParams(m.Command)
 		return nil
-	} else {
+	} else if c.serv.FindByNick(m.Args[0]) != nil {
 		// check if nick is in use
-
-		if c.serv.FindByNick(m.Args[0]) != nil {
-			c.Send(c.serv.hostname, "433", "*", m.Args[0], "Nickname already in use")
-			return nil
-		}
-
-		c.nick = m.Args[0]
+		c.Send(c.serv.hostname, "433", "*", m.Args[0], "Nickname already in use")
+		return nil
 	}
 
+	c.nick = m.Args[0]
+
 	if c.nick != "" && c.user != "" {
-		// send motd when everything is ready
-		c.serv.AddClient(c)
-		c.DoMotd()
+		// send motd when everything is ready, just once
+		c.welcome.Do(func() {
+			c.serv.AddClient(c)
+			c.DoMotd()
+		})
 	}
 	return nil
 }
@@ -234,19 +246,21 @@ func (c *Client) HandleUser(m parser.Message) error {
 	}
 
 	if c.nick != "" && c.user != "" {
-		// send motd when everything is ready
-		c.serv.AddClient(c)
-		c.DoMotd()
+		// send motd when everything is ready, just once
+		c.welcome.Do(func() {
+			c.serv.AddClient(c)
+			c.DoMotd()
+		})
 	}
 	return nil
 }
 
 // handle QUIT. forcefully shut down con for now...
 func (c *Client) HandleQuit(m parser.Message) error {
-  c.Error("goodbye")
-  c.con.Close()
+	c.Error("goodbye")
+	c.con.Close()
 
-  return nil
+	return nil
 }
 
 func (c *Client) HandlePing(m parser.Message) error {
@@ -315,6 +329,24 @@ func (c *Client) HandleMode(m parser.Message) error {
 		}
 
 	}
+
+	return nil
+}
+
+func (c *Client) HandleWho(m parser.Message) error {
+	u := make(map[string]*Client)
+
+	c.serv.cm.Lock()
+	for k, v := range c.serv.clients {
+		u[k] = v
+	}
+	c.serv.cm.Unlock()
+
+	for _, cl := range u {
+		c.Send(c.serv.hostname, "352", c.nick, "0", cl.user, cl.host, c.serv.hostname, cl.nick, fmt.Sprintf("0 %s", cl.realname))
+	}
+
+	c.Send(c.serv.hostname, "315", "end of WHO")
 
 	return nil
 }
