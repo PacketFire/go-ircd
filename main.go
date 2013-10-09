@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -49,6 +50,9 @@ type Ircd struct {
 	// nick->client, protected by RWMutex
 	clients map[string]*Client
 	cm      sync.RWMutex
+
+	channels map[string]*Channel
+	chm      sync.RWMutex
 }
 
 func NewIrcd(host string) Ircd {
@@ -56,9 +60,24 @@ func NewIrcd(host string) Ircd {
 		hostname: host,
 		boottime: time.Now(),
 		clients:  make(map[string]*Client),
+		channels: make(map[string]*Channel),
 	}
 }
 
+// Allocate a new Channel
+func (i *Ircd) NewChannel(name string) *Channel {
+	ch := &Channel{
+		serv:   i,
+		name:   name,
+		users:  make(map[*Client]struct{}),
+		modes:  NewModeset(),
+		umodes: make(map[*Client]Modeset),
+	}
+
+	return ch
+}
+
+// Allocate a new Client
 func (i *Ircd) NewClient(c net.Conn) *Client {
 	cl := Client{
 		serv:    i,
@@ -118,6 +137,13 @@ func (i *Ircd) FindByNick(nick string) *Client {
 	return i.clients[nick]
 }
 
+func (i *Ircd) FindChannel(name string) *Channel {
+	i.chm.RLock()
+	defer i.chm.RUnlock()
+
+	return i.channels[name]
+}
+
 func (i *Ircd) ChangeNick(old, nw string) error {
 	i.cm.Lock()
 	defer i.cm.Unlock()
@@ -155,6 +181,8 @@ var (
 		"PRIVMSG": (*Ircd).HandlePrivmsg,
 		"MODE":    (*Ircd).HandleMode,
 		"WHO":     (*Ircd).HandleWho,
+		"JOIN":    (*Ircd).HandleJoin,
+		"PART":    (*Ircd).HandlePart,
 	}
 )
 
@@ -302,7 +330,7 @@ func (i *Ircd) HandleMode(c *Client, m parser.Message) error {
 	defer c.Unlock()
 
 	if m.Args[0] != c.nick {
-		c.Send(c.serv.hostname, "502", c.nick, "no")
+		c.Send(i.hostname, "502", c.nick, "no")
 		return nil
 	}
 
@@ -334,6 +362,7 @@ func (i *Ircd) HandleMode(c *Client, m parser.Message) error {
 	return nil
 }
 
+// WHO
 func (i *Ircd) HandleWho(c *Client, m parser.Message) error {
 	u := make(map[string]*Client)
 
@@ -355,16 +384,100 @@ func (i *Ircd) HandleWho(c *Client, m parser.Message) error {
 	return nil
 }
 
-func (i *Ircd) Privmsg(from *Client, to, msg string) {
-	toc := i.FindByNick(to)
+// JOIN
+func (i *Ircd) HandleJoin(c *Client, m parser.Message) error {
+	var thech *Channel
+	if len(m.Args) < 1 {
+		c.Numeric("461", m.Command, "need more parameters")
+		return nil
+	}
 
+	log.Printf("%s attempts to join %q", c, m.Args[0])
+
+	i.chm.Lock()
+	defer i.chm.Unlock()
+
+	chans := strings.Split(m.Args[0], ",")
+
+	for _, chname := range chans {
+		if ch, ok := i.channels[chname]; ok {
+			// channel exists - easy
+			ch.AddClient(c)
+
+			thech = ch
+		} else {
+			// channel doesn't exist
+
+			// sanity checks on channel.
+			if chname == "" {
+				c.Numeric("403", "*", "No such channel")
+				return nil
+			}
+
+			if strings.Index(chname, "#") != 0 && strings.Index(chname, "&") != 0 {
+				c.Numeric("403", chname, "No such channel")
+				return nil
+			}
+
+			if len(chname) < 2 {
+				c.Numeric("403", chname, "No such channel")
+				return nil
+			}
+
+			// checks passed. make a channel.
+
+			newch := i.NewChannel(chname)
+
+			i.channels[chname] = newch
+
+			newch.AddClient(c)
+
+			thech = newch
+
+			log.Printf("JOIN: New Channel %s", newch.name)
+		}
+
+		// send messages about join
+		thech.Join(c)
+
+	}
+
+	return nil
+}
+
+func (i *Ircd) HandlePart(c *Client, m parser.Message) error {
+	var thech *Channel
+	if len(m.Args) < 1 {
+		c.Numeric("461", m.Command, "need more parameters")
+		return nil
+	}
+
+	i.chm.Lock()
+	defer i.chm.Unlock()
+
+	chans := strings.Split(m.Args[0], ",")
+
+	for _, chname := range chans {
+		if ch, ok := i.channels[chname]; ok {
+			if err := ch.RemoveUser(c); err != nil {
+				c.Numeric("442", chname, "not on channel")
+			}
+		}
+	}
+
+	return nil
+}
+
+func (i *Ircd) Privmsg(from *Client, to, msg string) {
 	from.RLock()
 	defer from.RUnlock()
 
-	if toc != nil {
-		toc.RLock()
-		defer toc.RUnlock()
-		toc.Privmsg(from.Prefix(), msg)
+	if tocl := i.FindByNick(to); tocl != nil {
+		tocl.RLock()
+		defer tocl.RUnlock()
+		tocl.Privmsg(from, msg)
+	} else if toch := i.FindChannel(to); toch != nil {
+		toch.Privmsg(from, msg)
 	} else {
 		from.Send(i.hostname, "401", from.nick, to, "No such user/nick")
 	}
@@ -410,6 +523,9 @@ type Client struct {
 
 	// user modes
 	modes Modeset
+
+	// Channels we are on
+	channels map[string]*Channel
 }
 
 // make a prefix from this client
@@ -434,9 +550,9 @@ func (c *Client) Send(prefix, command string, args ...string) error {
 	return err
 }
 
-func (c *Client) Privmsg(from, msg string) {
+func (c *Client) Privmsg(from *Client, msg string) {
 	c.RLock()
-	c.Send(from, "PRIVMSG", c.nick, msg)
+	c.Send(from.Prefix(), "PRIVMSG", c.nick, msg)
 	c.RUnlock()
 }
 
