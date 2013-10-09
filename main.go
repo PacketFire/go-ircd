@@ -439,14 +439,12 @@ func (i *Ircd) HandleJoin(c *Client, m parser.Message) error {
 
 		// send messages about join
 		thech.Join(c)
-
 	}
 
 	return nil
 }
 
 func (i *Ircd) HandlePart(c *Client, m parser.Message) error {
-	var thech *Channel
 	if len(m.Args) < 1 {
 		c.Numeric("461", m.Command, "need more parameters")
 		return nil
