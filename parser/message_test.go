@@ -1,27 +1,41 @@
-package parser
-
+package main
 import (
-	"bytes"
 	"testing"
 )
 
 type mtest struct {
 	line []byte
-	msg  Message
+	msg Message
 }
 
 var (
+	
 	mtests = []mtest{
+
 		mtest{
-			[]byte(":the.server.name NOTICE * :*** Looking up your hostname..."),
-			Message{"the.server.name", "NOTICE", []string{"*", "*** Looking up your hostname..."}},
+			[]byte(":nick!user@host.com PRIVMSG #42o3L1t3 :l0l sw4g 0m9 s0 c00l 42o"),
+			Message2{"nick!user@host.com", "PRIVMSG", []string{"#42o3L1t3", ":l0l sw4g 0m9 s0 c00l 42o"}},
 		},
+		
+		mtest{
+			[]byte("COMMAND :no arguments here!"),
+			Message2{"", "COMMAND", []string{":no arguments here!"}},
+		},
+
+		mtest{
+			[]byte("COMMAND nothing but arguments!"),
+			Message2{"", "COMMAND", []string{"nothing", "but", "arguments!"}},
+		},
+
 	}
+
 )
 
-func TestUnmarshalMessage(t *testing.T) {
+func TestUnmarshalText(t *testing.T) {
+
 	for _, ut := range mtests {
 		var m Message
+
 		if err := m.UnmarshalText(ut.line); err != nil {
 			t.Fatalf("unmarshal failed: %s", err)
 		}
@@ -29,29 +43,32 @@ func TestUnmarshalMessage(t *testing.T) {
 		t.Logf("unmarshal %q got %#v", ut.line, m)
 
 		if m.Prefix != ut.msg.Prefix {
-			t.Error("bad prefix")
+			t.Fatalf("Bad prefix")
 		}
 
 		if m.Command != ut.msg.Command {
-			t.Error("bad command")
+			t.Fatalf("Bad command")
 		}
 
 		if len(m.Args) != len(ut.msg.Args) {
-			t.Error("bad arg count")
+			t.Fatalf("Bad Arguments count")
+		}
+
+		for i, arg := range m.Args {
+
+			if (arg != ut.msg.Args[i]) {
+				t.Fatalf("Bad argument %v", i)
+			}
 		}
 	}
 }
 
-func TestMarshalMessage(t *testing.T) {
-	for _, mt := range mtests {
-		line, err := mt.msg.MarshalText()
+var unmarshaltext_message_bench = []byte(":server.kevlar.net NOTICE user :*** This is a test")
 
-		if err != nil {
-			t.Fatalf("marshal failed: %s", err)
-		}
-
-		if bytes.Compare(line, mt.line) != 0 {
-			t.Error("different lines")
-		}
+func BenchmarkUnmarshalText (b *testing.B) {
+	var m Message
+	for i := 0; i < b.N; i++ {
+		m.UnmarshalText(unmarshaltext_message_bench)
 	}
+
 }
