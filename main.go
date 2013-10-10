@@ -446,7 +446,6 @@ func (i *Ircd) HandleJoin(c *Client, m parser.Message) error {
 }
 
 func (i *Ircd) HandlePart(c *Client, m parser.Message) error {
-	var thech *Channel
 	if len(m.Args) < 1 {
 		c.Numeric("461", m.Command, "need more parameters")
 		return nil
@@ -538,11 +537,15 @@ func (c Client) String() string {
 }
 
 func (c *Client) Send(prefix, command string, args ...string) error {
-	m := parser.Message{prefix, command, args}
+	m := parser.Message{
+		Prefix:  prefix,
+		Command: command,
+		Args:    args,
+	}
 
 	b, err := m.MarshalText()
 	if err != nil {
-		log.Printf("marshalling %q failed: %s", err)
+		return fmt.Errorf("marshalling %s failed: %s", m, err)
 	}
 
 	log.Printf("Send: %s <- %s", c, m)
