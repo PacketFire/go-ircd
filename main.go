@@ -291,7 +291,7 @@ func (i *Ircd) HandlePing(c *Client, m parser.Message) error {
 		return nil
 	}
 
-	c.Send("", "PONG", m.Args[0])
+	c.Send(i.hostname, "PONG", i.hostname, fmt.Sprint(":",m.Args[0]))
 
 	return nil
 }
