@@ -363,22 +363,58 @@ func (i *Ircd) HandleMode(c *Client, m parser.Message) error {
 }
 
 // WHO
+//
+// reply format:
+// "<channel> <user> <host> <server> <nick> ( "H" / "G" > ["*"] [ ( "@" / "+" ) ] :<hopcount> <real name>" */
 func (i *Ircd) HandleWho(c *Client, m parser.Message) error {
-	u := make(map[string]*Client)
+	//	var operOnly bool
 
-	i.cm.RLock()
-	for k, v := range i.clients {
-		u[k] = v
-	}
-	i.cm.RUnlock()
-
-	for _, cl := range u {
-		// read lock cl
-		cl.RLock()
-		c.Send(c.serv.hostname, "352", c.nick, "0", cl.user, cl.host, i.hostname, cl.nick, fmt.Sprintf("0 %s", cl.realname))
-		cl.RUnlock()
+	// TODO: zero args should show all non-invisible users
+	if len(m.Args) < 1 {
+		goto done
 	}
 
+	if strings.Index(m.Args[0], "#") == 0 || strings.Index(m.Args[0], "&") == 0 {
+		// WHO for channel
+		u := make(map[string]*Client)
+
+		i.chm.RLock()
+    if ch, ok := i.channels[m.Args[0]]; ok {
+      ch.um.RLock()
+      for cl, _ := range ch.users {
+        cl.RLock()
+        u[cl.nick] = cl
+        cl.RUnlock()
+      }
+			ch.um.RUnlock()
+		}
+		i.chm.RUnlock()
+
+		for _, cl := range u {
+			// read lock cl
+			cl.RLock()
+			c.Send(c.serv.hostname, "352", c.nick, m.Args[0], cl.user, cl.host, i.hostname, cl.nick, "H", fmt.Sprintf("0 %s", cl.realname))
+			cl.RUnlock()
+		}
+
+	} else {
+		// WHO for nick
+		if cl := i.FindByNick(m.Args[0]); cl != nil {
+			cl.RLock()
+			c.Send(c.serv.hostname, "352", c.nick, "0", cl.user, cl.host, i.hostname, cl.nick, "H", fmt.Sprintf("0 %s", cl.realname))
+			cl.RUnlock()
+		}
+	}
+
+	/*
+		if len(m.Args) == 2 && m.Args[1] == "o" {
+			operOnly = true
+		} else {
+			operOnly = false
+		}
+	*/
+
+done:
 	c.Send(i.hostname, "315", "end of WHO")
 
 	return nil
