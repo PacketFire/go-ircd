@@ -317,46 +317,56 @@ const (
 //
 // TODO(mischief): check for user/chan modes when channels are implemented
 func (i *Ircd) HandleMode(c *Client, m parser.Message) error {
-
-	dir := ModeAdd
-
-	if len(m.Args) < 2 {
-		c.EParams(m.Command)
-		return nil
-	}
-
-	// write lock
 	c.Lock()
 	defer c.Unlock()
 
-	if m.Args[0] != c.nick {
-		c.Send(i.hostname, "502", c.nick, "no")
-		return nil
-	}
+	//dir := ModeAdd
 
-	// iterate through flags
-	for _, r := range m.Args[1] {
-		switch r {
-		case '+':
-			dir = ModeAdd
-		case '-':
-			dir = ModeDel
-		case '=':
-			dir = ModeQuery
-		default:
-			switch dir {
-			case ModeAdd:
-				log.Printf("HandleMode %s setting %c", c, r)
-				c.modes.Set(r, "")
-			case ModeDel:
-				log.Printf("HandleMode %s clearing %c", c, r)
-				c.modes.Clear(r)
-			case ModeQuery:
-				// do something with the result of this
-				//c.modes.Get(r)
+	switch n := len(m.Args); n {
+	case 1, 2:
+		// query
+		if strings.Index(m.Args[0], "#") == 0 || strings.Index(m.Args[0], "&") == 0 {
+			// channel
+			if ch := i.FindChannel(m.Args[0]); ch != nil {
+				if n == 1 {
+					// get
+					ch.um.RLock()
+					defer ch.um.RUnlock()
+					return nil
+				} else {
+					// set
+					ch.um.Lock()
+					defer ch.um.Unlock()
+					modes, _ := ch.modes.GetString()
+					c.Send("324", m.Args[0], modes)
+					return nil
+				}
+			} else {
+				// not found
+				c.Numeric("401", m.Args[0], "No such nick/channel")
+				return nil
+			}
+		} else {
+			// user
+			if m.Args[0] != c.nick {
+				// do nothing if this query is not for the sending user
+				return nil
+			}
+
+			if n == 1 {
+				// get
+				modes, _ := c.modes.GetString()
+				c.Numeric("221", modes)
+			} else {
+				// set
+				// TODO implement mode set for user
+				c.EParams(m.Command)
+				return nil
 			}
 		}
-
+	default:
+		c.EParams(m.Command)
+		return nil
 	}
 
 	return nil
@@ -379,13 +389,13 @@ func (i *Ircd) HandleWho(c *Client, m parser.Message) error {
 		u := make(map[string]*Client)
 
 		i.chm.RLock()
-    if ch, ok := i.channels[m.Args[0]]; ok {
-      ch.um.RLock()
-      for cl, _ := range ch.users {
-        cl.RLock()
-        u[cl.nick] = cl
-        cl.RUnlock()
-      }
+		if ch, ok := i.channels[m.Args[0]]; ok {
+			ch.um.RLock()
+			for cl, _ := range ch.users {
+				cl.RLock()
+				u[cl.nick] = cl
+				cl.RUnlock()
+			}
 			ch.um.RUnlock()
 		}
 		i.chm.RUnlock()
