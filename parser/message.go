@@ -64,9 +64,9 @@ func (m *Message) MarshalText() (text []byte, err error) {
 		b.WriteString(m.Prefix)
 	}
 
-  if len(m.Prefix) > 0 && len(m.Command) > 0 {
+	if len(m.Prefix) > 0 && len(m.Command) > 0 {
 		b.WriteByte(' ')
-  }
+	}
 
 	b.WriteString(m.Command)
 

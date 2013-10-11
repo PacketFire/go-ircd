@@ -135,33 +135,33 @@ var (
 			false,
 		},
 
-    mtest{
-      []byte(":foo bar"),
-      Message{"foo", "bar", nil},
-      false,
-      false,
-    },
+		mtest{
+			[]byte(":foo bar"),
+			Message{"foo", "bar", nil},
+			false,
+			false,
+		},
 
-    mtest{
-      []byte(":foo :bar baz"),
-      Message{"foo", "", []string{"bar baz"}},
-      false,
-      false,
-    },
+		mtest{
+			[]byte(":foo :bar baz"),
+			Message{"foo", "", []string{"bar baz"}},
+			false,
+			false,
+		},
 
-    mtest{
-      []byte(":foo :bar baz"),
-      Message{"foo", "", []string{"bar baz"}},
-      false,
-      false,
-    },
+		mtest{
+			[]byte(":foo :bar baz"),
+			Message{"foo", "", []string{"bar baz"}},
+			false,
+			false,
+		},
 
-    mtest{
-      []byte(":foo :bar baz"),
-      Message{"foo", "", []string{"bar baz"}},
-      false,
-      false,
-    },
+		mtest{
+			[]byte(":foo :bar baz"),
+			Message{"foo", "", []string{"bar baz"}},
+			false,
+			false,
+		},
 	}
 )
 
