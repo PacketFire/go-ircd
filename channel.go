@@ -87,7 +87,7 @@ func (ch *Channel) Privmsg(from *Client, msg string) error {
 	defer ch.um.RUnlock()
 
 	for cl, _ := range ch.users {
-		if cl.user != from.user {
+		if cl.nick != from.nick {
 			cl.Send(from.Prefix(), "PRIVMSG", ch.name, msg)
 		}
 	}
