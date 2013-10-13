@@ -117,10 +117,10 @@ func (i *Ircd) RemoveClient(c *Client) error {
 		return fmt.Errorf("bad nick")
 	}
 
-	i.cm.Lock()
-	defer i.cm.Unlock()
-
 	if oldc := i.FindByNick(c.nick); oldc != nil {
+		i.cm.Lock()
+		defer i.cm.Unlock()
+
 		delete(i.clients, oldc)
 		i.nclients--
 	} else {
@@ -190,7 +190,7 @@ func (i *Ircd) serveClient(c *Client) {
 			c.Error("malformed message")
 		}
 
-		log.Printf("Client.Serve: %s -> %s", c, m)
+		log.Printf("serveClient: %s -> %s", c, m)
 
 		if h, ok := msgtab[m.Command]; ok {
 			if err := h(i, c, m); err != nil {
@@ -204,7 +204,14 @@ func (i *Ircd) serveClient(c *Client) {
 	i.RemoveClient(c)
 
 	if err := c.inlines.Err(); err != nil {
-		log.Printf("serveClient: %s", err)
+		c.quit.Do(func() {
+			c.Quit(fmt.Sprintf("error: %s", err))
+		})
+		log.Printf("serveClient error: %s", err)
+	} else {
+		c.quit.Do(func() {
+			c.Quit("quit: eof")
+		})
 	}
 
 	log.Printf("serveClient: %s is done", c)
@@ -267,9 +274,19 @@ func (i *Ircd) HandleUser(c *Client, m parser.Message) error {
 	return nil
 }
 
+// QUIT
 func (i *Ircd) HandleQuit(c *Client, m parser.Message) error {
-	c.Error("goodbye")
-	c.con.Close()
+	var msg string
+
+	if len(m.Args) == 0 {
+		msg = ""
+	} else {
+		msg = m.Args[0]
+	}
+
+	c.quit.Do(func() {
+		c.Quit(fmt.Sprintf("QUIT: %s", msg))
+	})
 
 	return nil
 }
@@ -480,6 +497,7 @@ func (i *Ircd) HandleJoin(c *Client, m parser.Message) error {
 	return nil
 }
 
+// PART
 func (i *Ircd) HandlePart(c *Client, m parser.Message) error {
 	var partmsg string
 
@@ -509,6 +527,7 @@ func (i *Ircd) HandlePart(c *Client, m parser.Message) error {
 	return nil
 }
 
+// LIST
 func (i *Ircd) HandleList(c *Client, m parser.Message) error {
 	i.chm.RLock()
 	defer i.chm.RUnlock()
@@ -536,6 +555,7 @@ func (i *Ircd) HandleList(c *Client, m parser.Message) error {
 	return nil
 }
 
+// TOPIC
 func (i *Ircd) HandleTopic(c *Client, m parser.Message) error {
 	i.chm.Lock()
 	defer i.chm.Unlock()
@@ -568,6 +588,7 @@ func (i *Ircd) HandleTopic(c *Client, m parser.Message) error {
 	return nil
 }
 
+// Send a PRIVMSG from Client to channel or another client by name
 func (i *Ircd) Privmsg(from *Client, to, msg string) {
 	from.RLock()
 	defer from.RUnlock()
@@ -613,6 +634,9 @@ type Client struct {
 
 	// used to prevent multiple clients appearing on NICK
 	welcome sync.Once
+
+	// only QUIT once
+	quit sync.Once
 
 	// RWMutex for the below data. we can't have multiple people reading/writing..
 	sync.RWMutex
@@ -660,8 +684,8 @@ func (c *Client) Privmsg(from *Client, msg string) {
 	c.RUnlock()
 }
 
-func (c *Client) Error(content string) error {
-	return c.Send(c.serv.hostname, "NOTICE", []string{"*", content}...)
+func (c *Client) Error(what string) error {
+	return c.Send("", "ERROR", what)
 }
 
 func (c *Client) Errorf(format string, args ...interface{}) error {
@@ -675,4 +699,15 @@ func (c *Client) EParams(cmd string) error {
 func (c *Client) Numeric(code string, msg ...string) error {
 	out := append([]string{c.nick}, msg...)
 	return c.Send(c.serv.hostname, code, out...)
+}
+
+// Cleanup for the client. Remove ourselves from any channels and tell everyone
+// else that we are gone.
+func (c *Client) Quit(why string) {
+	log.Printf("%s QUIT: %s", c.Prefix(), why)
+
+	for _, ch := range c.channels {
+		ch.RemoveUser(c)
+		ch.Send(c.Prefix(), "QUIT", why)
+	}
 }
