@@ -497,10 +497,10 @@ func (i *Ircd) HandlePart(c *Client, m parser.Message) error {
 
 	for _, chname := range chans {
 		if ch, ok := i.channels[chname]; ok {
+			ch.Send(c.Prefix(), "PART", ch.name, partmsg)
 			if err := ch.RemoveUser(c); err != nil {
 				c.Numeric("442", chname, "not on channel")
 			}
-			ch.Send(c.Prefix(), "PART", ch.name, partmsg)
 		}
 	}
 
