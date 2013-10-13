@@ -176,6 +176,8 @@ var (
 		"WHO":     (*Ircd).HandleWho,
 		"JOIN":    (*Ircd).HandleJoin,
 		"PART":    (*Ircd).HandlePart,
+		"LIST":    (*Ircd).HandleList,
+		"TOPIC":   (*Ircd).HandleTopic,
 	}
 )
 
@@ -502,6 +504,65 @@ func (i *Ircd) HandlePart(c *Client, m parser.Message) error {
 				c.Numeric("442", chname, "not on channel")
 			}
 		}
+	}
+
+	return nil
+}
+
+func (i *Ircd) HandleList(c *Client, m parser.Message) error {
+	i.chm.RLock()
+	defer i.chm.RUnlock()
+
+	if len(m.Args) < 1 {
+		for _, ch := range i.channels {
+			ch.um.RLock()
+			c.Numeric("322", ch.name, fmt.Sprintf("%d", ch.nusers), ch.topic)
+			ch.um.RUnlock()
+		}
+	} else {
+		chans := strings.Split(m.Args[0], ",")
+
+		for _, chname := range chans {
+			if ch, ok := i.channels[chname]; ok {
+				ch.um.RLock()
+				c.Numeric("322", ch.name, fmt.Sprintf("%d", ch.nusers), ch.topic)
+				ch.um.RUnlock()
+			}
+		}
+	}
+
+	c.Numeric("323", "end of LIST")
+
+	return nil
+}
+
+func (i *Ircd) HandleTopic(c *Client, m parser.Message) error {
+	i.chm.Lock()
+	defer i.chm.Unlock()
+
+	if len(m.Args) < 1 {
+		c.EParams(m.Command)
+	}
+
+	ch, ok := i.channels[m.Args[0]]
+
+	if !ok {
+		c.Numeric("403", "no such channel")
+		return nil
+	}
+
+	switch len(m.Args) {
+	case 1:
+		// get topic
+		if ch.topic == "" {
+			c.Numeric("331", ch.name, "no topic")
+		} else {
+			c.Numeric("332", ch.name, ch.topic)
+		}
+	case 2:
+		// set topic
+		ch.topic = m.Args[1]
+		ch.Send(c.Prefix(), "TOPIC", ch.name, ch.topic)
 	}
 
 	return nil
