@@ -81,6 +81,20 @@ func (ch *Channel) Users() []string {
 	return users
 }
 
+// Send an IRC Message to all users on a channel
+func (ch *Channel) Send(prefix, command string, args ...string) error {
+	ch.um.RLock()
+	defer ch.um.RUnlock()
+
+	for cl, _ := range ch.users {
+		if err := cl.Send(prefix, command, args...); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // Send a privmsg to the whole channel
 func (ch *Channel) Privmsg(from *Client, msg string) error {
 	ch.um.RLock()
@@ -88,7 +102,9 @@ func (ch *Channel) Privmsg(from *Client, msg string) error {
 
 	for cl, _ := range ch.users {
 		if cl.nick != from.nick {
-			cl.Send(from.Prefix(), "PRIVMSG", ch.name, msg)
+			if err := cl.Send(from.Prefix(), "PRIVMSG", ch.name, msg); err != nil {
+				return err
+			}
 		}
 	}
 

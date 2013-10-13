@@ -99,12 +99,12 @@ func (i *Ircd) AddClient(c *Client) error {
 		return fmt.Errorf("bad nick")
 	}
 
-	i.cm.Lock()
-	defer i.cm.Unlock()
-
 	if oldc := i.FindByNick(c.nick); oldc != nil {
 		return fmt.Errorf("nick exists")
 	}
+
+	i.cm.Lock()
+	defer i.cm.Unlock()
 
 	i.clients[c] = struct{}{}
 	i.nclients++
@@ -148,18 +148,6 @@ func (i *Ircd) FindChannel(name string) *Channel {
 	defer i.chm.RUnlock()
 
 	return i.channels[name]
-}
-
-func (i *Ircd) ChangeNick(old, nw string) error {
-	i.cm.Lock()
-	defer i.cm.Unlock()
-	if c := i.FindByNick(old); c != nil {
-		c.nick = nw
-	} else {
-		return fmt.Errorf("no such nick %s", old)
-	}
-
-	return nil
 }
 
 func (i *Ircd) Serve(l net.Listener) error {
@@ -232,13 +220,7 @@ func (i *Ircd) HandleNick(c *Client, m parser.Message) error {
 
 	// write lock
 	c.Lock()
-
 	oldnick := c.nick
-	// check if we're actually updating an existing client's nick.
-	if oldc := i.FindByNick(c.nick); oldc != nil {
-		i.ChangeNick(c.nick, m.Args[0])
-	}
-
 	c.nick = m.Args[0]
 	c.Unlock()
 
@@ -497,9 +479,15 @@ func (i *Ircd) HandleJoin(c *Client, m parser.Message) error {
 }
 
 func (i *Ircd) HandlePart(c *Client, m parser.Message) error {
+	var partmsg string
+
 	if len(m.Args) < 1 {
 		c.Numeric("461", m.Command, "need more parameters")
 		return nil
+	}
+
+	if len(m.Args) > 1 {
+		partmsg = m.Args[1]
 	}
 
 	i.chm.Lock()
@@ -512,6 +500,7 @@ func (i *Ircd) HandlePart(c *Client, m parser.Message) error {
 			if err := ch.RemoveUser(c); err != nil {
 				c.Numeric("442", chname, "not on channel")
 			}
+			ch.Send(c.Prefix(), "PART", ch.name, partmsg)
 		}
 	}
 
