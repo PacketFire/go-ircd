@@ -47,8 +47,8 @@ type Ircd struct {
 	// number of currently connected clients
 	nclients int
 
-	// nick->client, protected by RWMutex
-	clients map[string]*Client
+	// Client set, protected by RWMutex
+	clients map[*Client]struct{}
 	cm      sync.RWMutex
 
 	channels map[string]*Channel
@@ -59,7 +59,7 @@ func NewIrcd(host string) Ircd {
 	return Ircd{
 		hostname: host,
 		boottime: time.Now(),
-		clients:  make(map[string]*Client),
+		clients:  make(map[*Client]struct{}),
 		channels: make(map[string]*Channel),
 	}
 }
@@ -102,11 +102,11 @@ func (i *Ircd) AddClient(c *Client) error {
 	i.cm.Lock()
 	defer i.cm.Unlock()
 
-	if _, ok := i.clients[c.nick]; ok {
+	if oldc := i.FindByNick(c.nick); oldc != nil {
 		return fmt.Errorf("nick exists")
 	}
 
-	i.clients[c.nick] = c
+	i.clients[c] = struct{}{}
 	i.nclients++
 
 	return nil
@@ -120,8 +120,8 @@ func (i *Ircd) RemoveClient(c *Client) error {
 	i.cm.Lock()
 	defer i.cm.Unlock()
 
-	if _, ok := i.clients[c.nick]; ok {
-		delete(i.clients, c.nick)
+	if oldc := i.FindByNick(c.nick); oldc != nil {
+		delete(i.clients, oldc)
 		i.nclients--
 	} else {
 		return fmt.Errorf("no such nick %s", c.nick)
@@ -134,7 +134,13 @@ func (i *Ircd) FindByNick(nick string) *Client {
 	i.cm.RLock()
 	defer i.cm.RUnlock()
 
-	return i.clients[nick]
+	for c, _ := range i.clients {
+		if c.nick == nick {
+			return c
+		}
+	}
+
+	return nil
 }
 
 func (i *Ircd) FindChannel(name string) *Channel {
@@ -147,9 +153,8 @@ func (i *Ircd) FindChannel(name string) *Channel {
 func (i *Ircd) ChangeNick(old, nw string) error {
 	i.cm.Lock()
 	defer i.cm.Unlock()
-	if c, ok := i.clients[old]; ok {
-		i.clients[nw] = c
-		delete(i.clients, old)
+	if c := i.FindByNick(old); c != nil {
+		c.nick = nw
 	} else {
 		return fmt.Errorf("no such nick %s", old)
 	}
