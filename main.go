@@ -80,10 +80,11 @@ func (i *Ircd) NewChannel(name string) *Channel {
 // Allocate a new Client
 func (i *Ircd) NewClient(c net.Conn) *Client {
 	cl := Client{
-		serv:    i,
-		con:     c,
-		inlines: bufio.NewScanner(c),
-		modes:   NewModeset(),
+		serv:     i,
+		con:      c,
+		inlines:  bufio.NewScanner(c),
+		modes:    NewModeset(),
+		channels: make(map[string]*Channel),
 	}
 
 	// grab just the ip of the remote user. pretty sure it's a TCPConn...
@@ -489,6 +490,11 @@ func (i *Ircd) HandleJoin(c *Client, m parser.Message) error {
 			log.Printf("JOIN: New Channel %s", newch.name)
 		}
 
+		// add channel to client's list of joined channels
+		c.Lock()
+		c.channels[chname] = thech
+		c.Unlock()
+
 		// send messages about join
 		thech.Join(c)
 
@@ -515,12 +521,18 @@ func (i *Ircd) HandlePart(c *Client, m parser.Message) error {
 
 	chans := strings.Split(m.Args[0], ",")
 
+	c.Lock()
+	defer c.Unlock()
 	for _, chname := range chans {
-		if ch, ok := i.channels[chname]; ok {
+		if ch, ok := c.channels[chname]; ok {
 			ch.Send(c.Prefix(), "PART", ch.name, partmsg)
 			if err := ch.RemoveUser(c); err != nil {
 				c.Numeric("442", chname, "not on channel")
+				continue
 			}
+
+			// remove this Channel from Client's map
+			delete(c.channels, chname)
 		}
 	}
 
