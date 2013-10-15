@@ -88,7 +88,7 @@ func (ch *Channel) Send(prefix, command string, args ...string) error {
 
 	for cl, _ := range ch.users {
 		if err := cl.Send(prefix, command, args...); err != nil {
-			return err
+      return err
 		}
 	}
 
