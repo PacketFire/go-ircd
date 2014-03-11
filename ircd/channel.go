@@ -24,7 +24,7 @@ type Channel struct {
 	topic string
 
 	// Channel modes
-	modes Modeset
+	modes *Modeset
 
 	// Modes of users on the channel
 	umodes map[*Client]Modeset
@@ -41,10 +41,8 @@ func (ch *Channel) AddClient(cl *Client) error {
 	ch.um.Lock()
 	defer ch.um.Unlock()
 
-	cl.RLock()
-	defer cl.RUnlock()
 	if _, ok := ch.users[cl]; ok {
-		return fmt.Errorf("user %s already in channel %s", cl.nick, ch.name)
+		return fmt.Errorf("user %s already in channel %s", cl, ch.name)
 	}
 
 	ch.users[cl] = struct{}{}

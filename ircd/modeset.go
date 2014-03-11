@@ -8,27 +8,26 @@ import (
 // A mode set.
 type Modeset struct {
 	modes map[rune]string
-	mm    *sync.RWMutex
+	mu    sync.Mutex
 }
 
-func NewModeset() Modeset {
-	return Modeset{
+func NewModeset() *Modeset {
+	return &Modeset{
 		modes: make(map[rune]string),
-		mm:    new(sync.RWMutex),
 	}
 }
 
 func (m *Modeset) Get(r rune) (val string, ok bool) {
-	m.mm.RLock()
-	defer m.mm.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	val, ok = m.modes[r]
 	return
 }
 
 func (m *Modeset) Set(r rune, val string) (old string) {
-	m.mm.Lock()
-	defer m.mm.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	old = m.modes[r]
 	m.modes[r] = val
@@ -36,8 +35,8 @@ func (m *Modeset) Set(r rune, val string) (old string) {
 }
 
 func (m *Modeset) Clear(r rune) (old string) {
-	m.mm.Lock()
-	defer m.mm.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	old = m.modes[r]
 	delete(m.modes, r)
@@ -48,8 +47,8 @@ func (m *Modeset) Clear(r rune) (old string) {
 // or like +iwx for a user
 // todo: add params
 func (m *Modeset) GetString() (modes, params string) {
-	m.mm.RLock()
-	defer m.mm.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	modebuf := bytes.NewBufferString("+")
 	parambuf := bytes.NewBufferString("")

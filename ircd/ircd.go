@@ -20,10 +20,10 @@ type Ircd struct {
 
 	// Client set, protected by RWMutex
 	clients map[*Client]struct{}
-	cm      *sync.RWMutex
+	cm      sync.RWMutex
 
 	channels map[string]*Channel
-	chm      *sync.RWMutex
+	chm      sync.RWMutex
 }
 
 func New(host string) *Ircd {
@@ -31,9 +31,7 @@ func New(host string) *Ircd {
 		hostname: host,
 		boottime: time.Now(),
 		clients:  make(map[*Client]struct{}),
-		cm:       new(sync.RWMutex),
 		channels: make(map[string]*Channel),
-		chm:      new(sync.RWMutex),
 	}
 }
 
@@ -52,14 +50,11 @@ func (i *Ircd) NewChannel(name string) *Channel {
 
 // Allocate a new Client
 func (i *Ircd) NewClient(c net.Conn) *Client {
-	cl := Client{
+	cl := &Client{
 		serv:     i,
 		con:      c,
 		inlines:  bufio.NewScanner(c),
 		modes:    NewModeset(),
-		welcome:  new(sync.Once),
-		quit:     new(sync.Once),
-		RWMutex:  new(sync.RWMutex),
 		channels: make(map[string]*Channel),
 	}
 
@@ -68,7 +63,7 @@ func (i *Ircd) NewClient(c net.Conn) *Client {
 
 	cl.host = tcpa.IP.String()
 
-	return &cl
+	return cl
 }
 
 func (i *Ircd) AddClient(c *Client) error {
@@ -204,17 +199,12 @@ func (i *Ircd) HandleNick(c *Client, m parser.Message) error {
 		return nil
 	}
 
-	// write lock
-	c.Lock()
-	oldnick := c.nick
-	c.nick = m.Args[0]
-	c.Unlock()
+	oldnick := c.Nick(m.Args[0])
 
-	c.RLock()
-	defer c.RUnlock()
-	if c.nick != "" && c.user != "" {
+	newn, newu := c.Nick(""), c.User("")
+	if newn != "" && newu != "" {
 		// ack the nick change only if we have an established user/nick
-		c.Send(fmt.Sprintf("%s!%s@%s", oldnick, c.user, c.host), "NICK", c.nick)
+		c.Send(fmt.Sprintf("%s!%s@%s", oldnick, newu, c.Host()), "NICK", newn)
 
 		// send motd when everything is ready, just once
 		c.welcome.Do(func() {
@@ -232,15 +222,10 @@ func (i *Ircd) HandleUser(c *Client, m parser.Message) error {
 		return nil
 	}
 
-	// write lock
-	c.Lock()
-	c.user = m.Args[0]
-	c.realname = m.Args[3]
-	c.Unlock()
+	c.User(m.Args[0])
+	c.Real(m.Args[3])
 
-	c.RLock()
-	defer c.RUnlock()
-	if c.nick != "" && c.user != "" {
+	if c.Nick("") != "" && c.User("") != "" {
 		// send motd when everything is ready, just once
 		c.welcome.Do(func() {
 			i.AddClient(c)
@@ -300,9 +285,6 @@ const (
 //
 // TODO(mischief): check for user/chan modes when channels are implemented
 func (i *Ircd) HandleMode(c *Client, m parser.Message) error {
-	c.Lock()
-	defer c.Unlock()
-
 	//dir := ModeAdd
 
 	switch n := len(m.Args); n {
@@ -331,7 +313,7 @@ func (i *Ircd) HandleMode(c *Client, m parser.Message) error {
 			}
 		} else {
 			// user
-			if m.Args[0] != c.nick {
+			if m.Args[0] != c.Nick("") {
 				// do nothing if this query is not for the sending user
 				return nil
 			}
@@ -375,9 +357,7 @@ func (i *Ircd) HandleWho(c *Client, m parser.Message) error {
 		if ch, ok := i.channels[m.Args[0]]; ok {
 			ch.um.RLock()
 			for cl, _ := range ch.users {
-				cl.RLock()
-				u[cl.nick] = cl
-				cl.RUnlock()
+				u[cl.Nick("")] = cl
 			}
 			ch.um.RUnlock()
 		}
@@ -385,17 +365,13 @@ func (i *Ircd) HandleWho(c *Client, m parser.Message) error {
 
 		for _, cl := range u {
 			// read lock cl
-			cl.RLock()
-			c.Send(c.serv.hostname, "352", c.nick, m.Args[0], cl.user, cl.host, i.hostname, cl.nick, "H", fmt.Sprintf("0 %s", cl.realname))
-			cl.RUnlock()
+			c.Send(i.hostname, "352", c.Nick(""), m.Args[0], cl.User(""), cl.Host(), i.hostname, cl.Nick(""), "H", fmt.Sprintf("0 %s", cl.Real("")))
 		}
 
 	} else {
 		// WHO for nick
 		if cl := i.FindByNick(m.Args[0]); cl != nil {
-			cl.RLock()
-			c.Send(c.serv.hostname, "352", c.nick, "0", cl.user, cl.host, i.hostname, cl.nick, "H", fmt.Sprintf("0 %s", cl.realname))
-			cl.RUnlock()
+			c.Send(i.hostname, "352", c.Nick(""), "0", cl.User(""), cl.Host(), i.hostname, cl.Nick(""), "H", fmt.Sprintf("0 %s", cl.Real("")))
 		}
 	}
 
@@ -467,9 +443,9 @@ func (i *Ircd) HandleJoin(c *Client, m parser.Message) error {
 		}
 
 		// add channel to client's list of joined channels
-		c.Lock()
+		c.mu.Lock()
 		c.channels[chname] = thech
-		c.Unlock()
+		c.mu.Unlock()
 
 		// send messages about join
 		thech.Join(c)
@@ -497,8 +473,8 @@ func (i *Ircd) HandlePart(c *Client, m parser.Message) error {
 
 	chans := strings.Split(m.Args[0], ",")
 
-	c.Lock()
-	defer c.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	for _, chname := range chans {
 		if ch, ok := c.channels[chname]; ok {
 			ch.Send(c.Prefix(), "PART", ch.name, partmsg)
@@ -578,17 +554,12 @@ func (i *Ircd) HandleTopic(c *Client, m parser.Message) error {
 
 // Send a PRIVMSG from Client to channel or another client by name
 func (i *Ircd) Privmsg(from *Client, to, msg string) {
-	from.RLock()
-	defer from.RUnlock()
-
 	if tocl := i.FindByNick(to); tocl != nil {
-		tocl.RLock()
-		defer tocl.RUnlock()
 		tocl.Privmsg(from, msg)
 	} else if toch := i.FindChannel(to); toch != nil {
 		toch.Privmsg(from, msg)
 	} else {
-		from.Send(i.hostname, "401", from.nick, to, "No such user/nick")
+		from.Send(i.hostname, "401", from.Nick(""), to, "No such user/nick")
 	}
 }
 
@@ -602,7 +573,7 @@ func (i *Ircd) DoMotd(c *Client) {
 	c.Numeric("252", "0", "operator(s) online")
 	c.Numeric("253", "0", "unknown connection(s)")
 	c.Numeric("254", "0", "channel(s) formed")
-	c.Numeric("255", fmt.Sprintf("I have %d clients and %d servers", c.serv.nclients, 1))
+	c.Numeric("255", fmt.Sprintf("I have %d clients and %d servers", i.nclients, 1))
 
 	c.Numeric("375", "- Message of the Day -")
 	c.Numeric("372", "- It works!")
@@ -610,6 +581,7 @@ func (i *Ircd) DoMotd(c *Client) {
 
 }
 
+// Irc client.
 type Client struct {
 	// server reference
 	serv *Ircd
@@ -621,23 +593,73 @@ type Client struct {
 	inlines *bufio.Scanner
 
 	// used to prevent multiple clients appearing on NICK
-	welcome *sync.Once
+	welcome sync.Once
 
 	// only QUIT once
-	quit *sync.Once
+	quit sync.Once
 
 	// RWMutex for the below data. we can't have multiple people reading/writing..
-	*sync.RWMutex
+	mu sync.Mutex
 
 	// various names
 	nick, user, realname string
 	host                 string
 
 	// user modes
-	modes Modeset
+	modes *Modeset
 
 	// Channels we are on
 	channels map[string]*Channel
+}
+
+// Set nick, return old. "" for get only.
+func (c *Client) Nick(n string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if n == "" {
+		return c.nick
+	}
+
+	old := c.nick
+	c.nick = n
+	return old
+}
+
+// Set user, return old. "" for get only.
+func (c *Client) User(u string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if u == "" {
+		return c.user
+	}
+
+	old := c.user
+	c.user = u
+	return old
+}
+
+// Set realname, return old. "" for get only.
+func (c *Client) Real(r string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if r == "" {
+		return c.realname
+	}
+
+	old := c.realname
+	c.realname = r
+	return old
+}
+
+// Get host, read only.
+func (c *Client) Host() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.host
 }
 
 // make a prefix from this client
@@ -645,7 +667,7 @@ func (c *Client) Prefix() string {
 	return fmt.Sprintf("%s!%s@%s", c.nick, c.user, c.host)
 }
 
-func (c Client) String() string {
+func (c *Client) String() string {
 	return c.Prefix()
 }
 
@@ -661,15 +683,16 @@ func (c *Client) Send(prefix, command string, args ...string) error {
 		return fmt.Errorf("marshalling %s failed: %s", m, err)
 	}
 
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	log.Printf("Send: %s <- %s", c, m)
 	fmt.Fprintf(c.con, "%s\r\n", b)
 	return err
 }
 
 func (c *Client) Privmsg(from *Client, msg string) {
-	c.RLock()
 	c.Send(from.Prefix(), "PRIVMSG", c.nick, msg)
-	c.RUnlock()
 }
 
 func (c *Client) Error(what string) error {
