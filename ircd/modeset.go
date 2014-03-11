@@ -1,4 +1,4 @@
-package main
+package ircd
 
 import (
 	"bytes"
@@ -8,11 +8,14 @@ import (
 // A mode set.
 type Modeset struct {
 	modes map[rune]string
-	mm    sync.RWMutex
+	mm    *sync.RWMutex
 }
 
 func NewModeset() Modeset {
-	return Modeset{modes: make(map[rune]string)}
+	return Modeset{
+		modes: make(map[rune]string),
+		mm:    new(sync.RWMutex),
+	}
 }
 
 func (m *Modeset) Get(r rune) (val string, ok bool) {

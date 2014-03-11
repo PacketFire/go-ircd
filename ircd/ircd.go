@@ -1,44 +1,15 @@
-package main
+package ircd
 
 import (
 	"bufio"
-	"flag"
 	"fmt"
 	"github.com/PacketFire/go-ircd/parser"
 	"log"
-	"math/rand"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"time"
 )
-
-func init() {
-	rand.Seed(time.Now().UTC().UnixNano())
-}
-
-func main() {
-	flag.Parse()
-
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("main: recovered from %v", r)
-		}
-	}()
-
-	l, err := net.Listen("tcp", ":6667")
-	if err != nil {
-		log.Fatalf("main: can't listen: %v", err)
-	}
-
-	host, err := os.Hostname()
-	ircd := NewIrcd(host)
-
-	if err := ircd.Serve(l); err != nil {
-		log.Printf("Serve: %s", err)
-	}
-}
 
 type Ircd struct {
 	hostname string
@@ -49,18 +20,20 @@ type Ircd struct {
 
 	// Client set, protected by RWMutex
 	clients map[*Client]struct{}
-	cm      sync.RWMutex
+	cm      *sync.RWMutex
 
 	channels map[string]*Channel
-	chm      sync.RWMutex
+	chm      *sync.RWMutex
 }
 
-func NewIrcd(host string) Ircd {
-	return Ircd{
+func New(host string) *Ircd {
+	return &Ircd{
 		hostname: host,
 		boottime: time.Now(),
 		clients:  make(map[*Client]struct{}),
+		cm:       new(sync.RWMutex),
 		channels: make(map[string]*Channel),
+		chm:      new(sync.RWMutex),
 	}
 }
 
@@ -84,6 +57,9 @@ func (i *Ircd) NewClient(c net.Conn) *Client {
 		con:      c,
 		inlines:  bufio.NewScanner(c),
 		modes:    NewModeset(),
+		welcome:  new(sync.Once),
+		quit:     new(sync.Once),
+		RWMutex:  new(sync.RWMutex),
 		channels: make(map[string]*Channel),
 	}
 
@@ -645,13 +621,13 @@ type Client struct {
 	inlines *bufio.Scanner
 
 	// used to prevent multiple clients appearing on NICK
-	welcome sync.Once
+	welcome *sync.Once
 
 	// only QUIT once
-	quit sync.Once
+	quit *sync.Once
 
 	// RWMutex for the below data. we can't have multiple people reading/writing..
-	sync.RWMutex
+	*sync.RWMutex
 
 	// various names
 	nick, user, realname string

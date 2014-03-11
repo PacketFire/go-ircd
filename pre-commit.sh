@@ -16,7 +16,7 @@ then
     trap 'git stash pop -q' EXIT 
 fi
 
-go build >/dev/null 2>&1
+go build ./... >/dev/null 2>&1
 if [ $? -ne 0 ]
 then
   echo "Failed to build project. Please check the output of"

@@ -1,4 +1,4 @@
-package main
+package ircd
 
 import (
 	"strings"
