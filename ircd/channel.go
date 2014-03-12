@@ -2,6 +2,7 @@ package ircd
 
 import (
 	"fmt"
+	"github.com/PacketFire/go-ircd/parser"
 	"strings"
 	"sync"
 )
@@ -28,41 +29,79 @@ type Channel struct {
 
 	// Modes of users on the channel
 	umodes map[*Client]Modeset
-	// modes mutex
-	mm sync.RWMutex
+
+	Join chan *Client
+	Part chan *Client
+	Msg  chan parser.Message
 }
 
 // Create a new channel
 func NewChannel(serv *Ircd, name string) *Channel {
-	return &Channel{name: name}
+	ch := &Channel{
+		serv:   serv,
+		name:   name,
+		users:  make(map[*Client]struct{}),
+		modes:  NewModeset(),
+		umodes: make(map[*Client]Modeset),
+		Join:   make(chan *Client, 5),
+		Part:   make(chan *Client, 5),
+		Msg:    make(chan parser.Message, 5),
+	}
+	return ch
 }
 
-func (ch *Channel) AddClient(cl *Client) error {
-	ch.um.Lock()
-	defer ch.um.Unlock()
+func (ch *Channel) Run() {
+	for {
+		select {
+		case c := <-ch.Join:
+			if _, ok := ch.users[c]; ok {
+				fmt.Errorf("user %s already in channel %s", c, ch.name)
+				// some reply about being on channel
+				break
+			}
+			ch.users[c] = struct{}{}
+			ch.nusers++
+			// inform user of join
+			c.Send(c.Prefix(), "JOIN", ch.name)
 
-	if _, ok := ch.users[cl]; ok {
-		return fmt.Errorf("user %s already in channel %s", cl, ch.name)
+			// topic
+			if ch.topic != "" {
+				c.Send(ch.serv.Name(), "332", ch.name, ch.topic)
+			}
+
+			// time created?
+			//who.Send(ch.serv.Name(), "333", who.nick, ch.name, "0")
+
+			//ch.um.RLock()
+			//defer ch.um.RUnlock()
+
+			// nick list, meh
+			c.Send(ch.serv.Name(), "353", "=", ch.name, strings.Join(ch.Users(), " "))
+			// end nicks
+			c.Send(ch.serv.Name(), "366", ch.name, "end of /NAMES")
+
+			// finally, inform other users of join
+			for cl, _ := range ch.users {
+				if cl.nick != c.nick {
+					cl.Send(c.Prefix(), "JOIN", ch.name)
+				}
+			}
+
+		case c := <-ch.Part:
+			if _, ok := ch.users[c]; ok {
+				delete(ch.users, c)
+				ch.nusers--
+			} else {
+				fmt.Errorf("%s not on channel %s", c, ch.name)
+			}
+		case m := <-ch.Msg:
+			for cl, _ := range ch.users {
+				if cl.Prefix() != m.Prefix {
+					cl.Send(m.Prefix, m.Command, append([]string{ch.name}, m.Args...)...)
+				}
+			}
+		}
 	}
-
-	ch.users[cl] = struct{}{}
-	ch.nusers++
-
-	return nil
-}
-
-func (ch *Channel) RemoveUser(cl *Client) error {
-	ch.um.Lock()
-	defer ch.um.Unlock()
-
-	if _, ok := ch.users[cl]; ok {
-		delete(ch.users, cl)
-		ch.nusers--
-	} else {
-		return fmt.Errorf("%s not on channel %s", cl.nick, ch.name)
-	}
-
-	return nil
 }
 
 // Generate a slice of nicks on the channel
@@ -81,61 +120,13 @@ func (ch *Channel) Users() []string {
 
 // Send an IRC Message to all users on a channel
 func (ch *Channel) Send(prefix, command string, args ...string) error {
-	ch.um.RLock()
-	defer ch.um.RUnlock()
-
-	for cl, _ := range ch.users {
-		if err := cl.Send(prefix, command, args...); err != nil {
-			return err
-		}
-	}
+	ch.Msg <- parser.Message{prefix, command, args}
 
 	return nil
 }
 
-// Send a privmsg to the whole channel
 func (ch *Channel) Privmsg(from *Client, msg string) error {
-	ch.um.RLock()
-	defer ch.um.RUnlock()
-
-	for cl, _ := range ch.users {
-		if cl.nick != from.nick {
-			if err := cl.Send(from.Prefix(), "PRIVMSG", ch.name, msg); err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
-}
-
-// Inform joining client and other clients about the join
-func (ch *Channel) Join(who *Client) error {
-	ch.um.RLock()
-	defer ch.um.RUnlock()
-
-	// inform user of join
-	who.Send(who.Prefix(), "JOIN", ch.name)
-
-	// topic
-	if ch.topic != "" {
-		who.Send(ch.serv.hostname, "332", who.nick, ch.name, ch.topic)
-	}
-
-	// time created?
-	//who.Send(ch.serv.hostname, "333", who.nick, ch.name, "0")
-
-	// nick list, meh
-	who.Send(ch.serv.hostname, "353", who.nick, "=", ch.name, strings.Join(ch.Users(), " "))
-	// end nicks
-	who.Send(ch.serv.hostname, "366", who.nick, ch.name, "end of /NAMES")
-
-	// finally, inform other users of join
-	for cl, _ := range ch.users {
-		if cl.nick != who.nick {
-			cl.Send(who.Prefix(), "JOIN", ch.name)
-		}
-	}
+	ch.Msg <- parser.Message{from.Prefix(), "PRIVMSG", []string{msg}}
 
 	return nil
 }
