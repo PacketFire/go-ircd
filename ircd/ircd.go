@@ -105,12 +105,14 @@ func (i *Ircd) FindChannel(name string) *Channel {
 	return i.channels[name]
 }
 
+// Stop the irc server.
 func (i *Ircd) Stop() error {
 	stop := make(chan error)
 	i.stop <- stop
 	return <-stop
 }
 
+// Accept connections and serve clients until an error or a call to Stop occurs.
 func (i *Ircd) Serve() (err error) {
 	accept := make(chan net.Conn)
 
@@ -118,7 +120,6 @@ func (i *Ircd) Serve() (err error) {
 		for {
 			rw, e := i.conf.Listener.Accept()
 			if e != nil {
-				err = e
 				break
 			}
 			accept <- rw
@@ -415,7 +416,9 @@ func (i *Ircd) HandleJoin(c *Client, m parser.Message) error {
 		}
 
 		// add channel to client's list of joined channels
+		c.mu.Lock()
 		c.channels[chname] = thech
+		c.mu.Unlock()
 
 		// send messages about join
 		thech.Join <- c
@@ -427,16 +430,18 @@ func (i *Ircd) HandleJoin(c *Client, m parser.Message) error {
 
 // PART
 func (i *Ircd) HandlePart(c *Client, m parser.Message) error {
-	var partmsg string
-
 	if len(m.Args) < 1 {
 		c.Numeric("461", m.Command, "need more parameters")
 		return nil
 	}
 
-	if len(m.Args) > 1 {
-		partmsg = m.Args[1]
-	}
+	/*
+		var partmsg string
+
+		if len(m.Args) > 1 {
+			partmsg = m.Args[1]
+		}
+	*/
 
 	chans := strings.Split(m.Args[0], ",")
 
@@ -447,7 +452,7 @@ func (i *Ircd) HandlePart(c *Client, m parser.Message) error {
 	for _, chname := range chans {
 		if ch, ok := onchans[chname]; ok {
 			ch.Part <- c
-			ch.Send(c.Prefix(), "PART", ch.name, partmsg)
+			//ch.Send(c.Prefix(), "PART", ch.name, partmsg)
 
 			// remove this Channel from Client's map
 			c.mu.Lock()
@@ -601,7 +606,6 @@ func NewClient(ircd *Ircd, c net.Conn) *Client {
 
 	// grab just the ip of the remote user. pretty sure it's a TCPConn...
 	tcpa := c.RemoteAddr().(*net.TCPAddr)
-
 	cl.host = tcpa.IP.String()
 
 	go cl.readin()
@@ -647,9 +651,11 @@ forever:
 		select {
 		case m := <-c.In:
 			if h, ok := msgtab[m.Command]; ok {
-				if err := h(c.serv, c, m); err != nil {
-					c.Errorf("%s: %s", m.Command, err)
-				}
+				go func() {
+					if err := h(c.serv, c, m); err != nil {
+						c.Errorf("%s: %s", m.Command, err)
+					}
+				}()
 			} else {
 				c.Errorf("not implemented: %s", m.Command)
 			}

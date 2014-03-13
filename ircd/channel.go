@@ -82,13 +82,16 @@ func (ch *Channel) Run() {
 
 			// finally, inform other users of join
 			for cl, _ := range ch.users {
-				if cl.nick != c.nick {
+				if cl.Str(CNick, "") != c.Str(CNick, "") {
 					cl.Send(c.Prefix(), "JOIN", ch.name)
 				}
 			}
 
 		case c := <-ch.Part:
 			if _, ok := ch.users[c]; ok {
+				for cl, _ := range ch.users {
+					cl.Send(c.Prefix(), "PART", ch.name, "part")
+				}
 				delete(ch.users, c)
 				ch.nusers--
 			} else {
