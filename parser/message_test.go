@@ -233,3 +233,11 @@ func BenchmarkUnmarshalText(b *testing.B) {
 	}
 
 }
+
+var marshaltext_message_bench = Message{"someguy!user@foo.bar.com", "PRIVMSG", []string{"#testing", "foo bar baz quux"}}
+
+func BenchmarkMarshalText(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		marshaltext_message_bench.MarshalText()
+	}
+}
