@@ -30,9 +30,10 @@ type Channel struct {
 	// Modes of users on the channel
 	umodes map[*Client]Modeset
 
-	Join chan *Client
-	Part chan *Client
-	Msg  chan parser.Message
+	Join      chan *Client
+	Part      chan *Client
+	Msg       chan parser.Message
+	UsersList chan chan *Client
 }
 
 // Create a new channel
@@ -43,9 +44,10 @@ func NewChannel(serv *Ircd, name string) *Channel {
 		users:  make(map[*Client]struct{}),
 		modes:  NewModeset(),
 		umodes: make(map[*Client]Modeset),
-		Join:   make(chan *Client, 5),
-		Part:   make(chan *Client, 5),
-		Msg:    make(chan parser.Message, 5),
+		Join:   make(chan *Client, 100),
+		Part:   make(chan *Client, 100),
+		Msg:    make(chan parser.Message, 100),
+		UsersList:  make(chan chan *Client, 10),
 	}
 	return ch
 }
@@ -56,7 +58,6 @@ func (ch *Channel) Run() {
 		case c := <-ch.Join:
 			if _, ok := ch.users[c]; ok {
 				fmt.Errorf("user %s already in channel %s", c, ch.name)
-				// some reply about being on channel
 				break
 			}
 			ch.users[c] = struct{}{}
@@ -76,7 +77,11 @@ func (ch *Channel) Run() {
 			//defer ch.um.RUnlock()
 
 			// nick list, meh
-			c.Send(ch.serv.Name(), "353", "=", ch.name, strings.Join(ch.Users(), " "))
+			users := make([]string, len(ch.users))
+			for u := range ch.users {
+				users = append(users, u.nick)
+			}
+			c.Send(ch.serv.Name(), "353", "=", ch.name, strings.Join(users, " "))
 			// end nicks
 			c.Send(ch.serv.Name(), "366", ch.name, "end of /NAMES")
 
@@ -90,7 +95,7 @@ func (ch *Channel) Run() {
 		case c := <-ch.Part:
 			if _, ok := ch.users[c]; ok {
 				for cl, _ := range ch.users {
-					cl.Send(c.Prefix(), "PART", ch.name, "part")
+					go cl.Send(c.Prefix(), "PART", ch.name, "part")
 				}
 				delete(ch.users, c)
 				ch.nusers--
@@ -100,25 +105,26 @@ func (ch *Channel) Run() {
 		case m := <-ch.Msg:
 			for cl, _ := range ch.users {
 				if cl.Prefix() != m.Prefix {
-					cl.Send(m.Prefix, m.Command, append([]string{ch.name}, m.Args...)...)
+					go cl.Send(m.Prefix, m.Command, append([]string{ch.name}, m.Args...)...)
 				}
 			}
+		case out := <-ch.UsersList:
+			// Request to list users on this channel
+			for cl, _ := range ch.users {
+				out <- cl
+			}
+			close(out)
 		}
 	}
 }
 
-// Generate a slice of nicks on the channel
-func (ch *Channel) Users() []string {
-	var users []string
+// Generate a list of nicks on the channel
+func (ch *Channel) Users() chan *Client {
+	out := make(chan *Client, len(ch.users))
 
-	ch.um.RLock()
-	defer ch.um.RUnlock()
+	ch.UsersList <- out
 
-	for cl, _ := range ch.users {
-		users = append(users, cl.nick)
-	}
-
-	return users
+	return out
 }
 
 // Send an IRC Message to all users on a channel
