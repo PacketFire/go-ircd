@@ -1,0 +1,12 @@
+# vim temporary files
+*.swp
+
+# log files
+*.log
+
+# profiling files
+*.out
+
+# go test binaries
+*.test
+
