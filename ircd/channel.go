@@ -39,15 +39,15 @@ type Channel struct {
 // Create a new channel
 func NewChannel(serv *Ircd, name string) *Channel {
 	ch := &Channel{
-		serv:   serv,
-		name:   name,
-		users:  make(map[*Client]struct{}),
-		modes:  NewModeset(),
-		umodes: make(map[*Client]Modeset),
-		Join:   make(chan *Client, 100),
-		Part:   make(chan *Client, 100),
-		Msg:    make(chan parser.Message, 100),
-		UsersList:  make(chan chan *Client, 10),
+		serv:      serv,
+		name:      name,
+		users:     make(map[*Client]struct{}),
+		modes:     NewModeset(),
+		umodes:    make(map[*Client]Modeset),
+		Join:      make(chan *Client, 100),
+		Part:      make(chan *Client, 100),
+		Msg:       make(chan parser.Message, 100),
+		UsersList: make(chan chan *Client, 10),
 	}
 	return ch
 }
@@ -129,13 +129,13 @@ func (ch *Channel) Users() chan *Client {
 
 // Send an IRC Message to all users on a channel
 func (ch *Channel) Send(prefix, command string, args ...string) error {
-	ch.Msg <- parser.Message{prefix, command, args}
+	ch.Msg <- parser.Message{Prefix: prefix, Command: command, Args: args}
 
 	return nil
 }
 
 func (ch *Channel) Privmsg(from *Client, msg string) error {
-	ch.Msg <- parser.Message{from.Prefix(), "PRIVMSG", []string{msg}}
+	ch.Send(from.Prefix(), "PRIVMSG", msg)
 
 	return nil
 }
