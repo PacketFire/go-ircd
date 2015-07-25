@@ -99,8 +99,6 @@ func (c *ircClient) readin() {
 			Errorf(c, "malformed message")
 		}
 
-		log.Printf("readin: %s -> %s", c, m)
-
 		c.in <- m
 	}
 
@@ -108,14 +106,11 @@ func (c *ircClient) readin() {
 		c.quitonce.Do(func() {
 			c.quit <- fmt.Sprintf("read error: %s", err)
 		})
-		log.Printf("readin error: %s", err)
 	} else {
 		c.quitonce.Do(func() {
 			c.quit <- "EOF"
 		})
 	}
-
-	log.Printf("%s readin is done", c)
 }
 
 func (c *ircClient) loop() {
