@@ -2,24 +2,37 @@ package ircd
 
 import (
 	"fmt"
-	"github.com/PacketFire/go-ircd/parser"
 	"strings"
 	"sync"
+
+	"github.com/PacketFire/go-ircd/parser"
 )
 
+type Channel interface {
+	Name() string
+	Join(c Client) error
+	Part(c Client) error
+	Close() error
+	Users() []Client
+	Topic() string
+	SetTopic(topic string) string
+	Send(prefix, command string, args ...string) error // send a message to the client
+}
+
 // An IRC Channel
-type Channel struct {
+type ircChannel struct {
+	mu sync.Mutex
+
 	// server instance
-	serv *Ircd
+	srv     Server
+	srvname string
 	// Channel name, including #/&
 	name string
 
 	// Users joined to channel
-	users map[*Client]struct{}
+	users map[string]Client
 	// Count of current users
 	nusers int
-	// users mutex
-	um sync.RWMutex
 
 	// Channel topic
 	topic string
@@ -28,114 +41,140 @@ type Channel struct {
 	modes *Modeset
 
 	// Modes of users on the channel
-	umodes map[*Client]Modeset
-
-	Join      chan *Client
-	Part      chan *Client
-	Msg       chan parser.Message
-	UsersList chan chan *Client
+	umodes map[string]Modeset
 }
 
 // Create a new channel
-func NewChannel(serv *Ircd, name string) *Channel {
-	ch := &Channel{
-		serv:      serv,
-		name:      name,
-		users:     make(map[*Client]struct{}),
-		modes:     NewModeset(),
-		umodes:    make(map[*Client]Modeset),
-		Join:      make(chan *Client, 100),
-		Part:      make(chan *Client, 100),
-		Msg:       make(chan parser.Message, 100),
-		UsersList: make(chan chan *Client, 10),
+func NewChannel(srv Server, srvname, name string) Channel {
+	ch := &ircChannel{
+		srv:     srv,
+		srvname: srvname,
+		name:    name,
+		users:   make(map[string]Client),
+		topic:   " ", // gross
+		modes:   NewModeset(),
+		umodes:  make(map[string]Modeset),
 	}
 	return ch
 }
 
-func (ch *Channel) Run() {
-	for {
-		select {
-		case c := <-ch.Join:
-			if _, ok := ch.users[c]; ok {
-				fmt.Errorf("user %s already in channel %s", c, ch.name)
-				break
-			}
-			ch.users[c] = struct{}{}
-			ch.nusers++
-			// inform user of join
-			c.Send(c.Prefix(), "JOIN", ch.name)
+func (ch *ircChannel) Close() error {
+	return nil
+}
 
-			// topic
-			if ch.topic != "" {
-				c.Send(ch.serv.Name(), "332", ch.name, ch.topic)
-			}
+// Name returns the channel name, including the leading hash.
+func (ch *ircChannel) Name() string {
+	return ch.name
+}
 
-			// time created?
-			//who.Send(ch.serv.Name(), "333", who.nick, ch.name, "0")
+func (ch *ircChannel) Join(c Client) error {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	if _, ok := ch.users[c.Nick()]; ok {
+		return fmt.Errorf("user %s already in channel %s", c, ch.name)
+	}
 
-			//ch.um.RLock()
-			//defer ch.um.RUnlock()
+	ch.users[c.Nick()] = c
+	ch.nusers++
 
-			// nick list, meh
-			users := make([]string, len(ch.users))
-			for u := range ch.users {
-				users = append(users, u.nick)
-			}
-			c.Send(ch.serv.Name(), "353", "=", ch.name, strings.Join(users, " "))
-			// end nicks
-			c.Send(ch.serv.Name(), "366", ch.name, "end of /NAMES")
+	// inform user of join
+	c.Send(c.Prefix(), "JOIN", ch.name)
 
-			// finally, inform other users of join
-			for cl, _ := range ch.users {
-				if cl.Str(CNick, "") != c.Str(CNick, "") {
-					cl.Send(c.Prefix(), "JOIN", ch.name)
-				}
-			}
+	// topic
+	if ch.topic != "" {
+		c.Send(ch.srvname, "332", ch.name, ch.topic)
+	}
 
-		case c := <-ch.Part:
-			if _, ok := ch.users[c]; ok {
-				for cl, _ := range ch.users {
-					go cl.Send(c.Prefix(), "PART", ch.name, "part")
-				}
-				delete(ch.users, c)
-				ch.nusers--
-			} else {
-				fmt.Errorf("%s not on channel %s", c, ch.name)
-			}
-		case m := <-ch.Msg:
-			for cl, _ := range ch.users {
-				if cl.Prefix() != m.Prefix {
-					go cl.Send(m.Prefix, m.Command, append([]string{ch.name}, m.Args...)...)
-				}
-			}
-		case out := <-ch.UsersList:
-			// Request to list users on this channel
-			for cl, _ := range ch.users {
-				out <- cl
-			}
-			close(out)
+	// time created?
+	//who.Send(ch.serv.Name(), "333", who.nick, ch.name, "0")
+
+	//ch.um.RLock()
+	//defer ch.um.RUnlock()
+
+	// nick list, meh
+	users := make([]string, len(ch.users))
+	for u := range ch.users {
+		users = append(users, u)
+	}
+
+	Numeric(ch.srv.Name(), c, "353", "=", ch.name, strings.Join(users, " "))
+	// end nicks
+	Numeric(ch.srv.Name(), c, "366", ch.name, "end of /NAMES")
+
+	// finally, inform other users of join
+	cnick := c.Nick()
+	cprefix := c.Prefix()
+	for onick, ocl := range ch.users {
+		if cnick != onick {
+			ocl.Send(cprefix, "JOIN", ch.name)
 		}
 	}
+
+	return nil
+}
+
+func (ch *ircChannel) Part(c Client) error {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	cnick := c.Nick()
+	if _, ok := ch.users[cnick]; !ok {
+		return fmt.Errorf("%s not on channel %s", c, ch.name)
+	}
+
+	cprefix := c.Prefix()
+	for _, ocl := range ch.users {
+		go ocl.Send(cprefix, "PART", ch.name, "part")
+	}
+	delete(ch.users, cnick)
+	ch.nusers--
+
+	return nil
 }
 
 // Generate a list of nicks on the channel
-func (ch *Channel) Users() chan *Client {
-	out := make(chan *Client, len(ch.users))
+func (ch *ircChannel) Users() []Client {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
 
-	ch.UsersList <- out
+	out := make([]Client, len(ch.users))
+	i := 0
+
+	for _, c := range ch.users {
+		out[i] = c
+		i++
+	}
 
 	return out
 }
 
+func (ch *ircChannel) Topic() string {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	return ch.topic
+}
+
+func (ch *ircChannel) SetTopic(topic string) string {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	old := ch.topic
+	ch.topic = topic
+	return old
+}
+
 // Send an IRC Message to all users on a channel
-func (ch *Channel) Send(prefix, command string, args ...string) error {
-	ch.Msg <- parser.Message{Prefix: prefix, Command: command, Args: args}
+func (ch *ircChannel) Send(prefix, command string, args ...string) error {
+	m := parser.Message{Prefix: prefix, Command: command, Args: args}
+
+	for onick, ocl := range ch.users {
+		mnick, _, _ := SplitPrefix(m.Prefix)
+		if mnick != onick {
+			ocl.Send(m.Prefix, m.Command, m.Args...)
+		}
+	}
 
 	return nil
 }
 
-func (ch *Channel) Privmsg(from *Client, msg string) error {
-	ch.Send(from.Prefix(), "PRIVMSG", msg)
-
-	return nil
+func (ch *ircChannel) Privmsg(from Client, msg string) error {
+	return ch.Send(from.Prefix(), "PRIVMSG", ch.Name(), msg)
 }
